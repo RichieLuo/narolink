@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#202536">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>NaroLink</title>
+  <link rel="icon" href="/icons/192.png">
+  <link rel="apple-touch-icon" href="/icons/180.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <section class="gate" id="gate">
+    <form class="pair-card" id="pair-form">
+      <img src="/icons/192.png" width="50" height="50" alt="">
+      <h1>NaroLink</h1>
+      <p>输入电脑端「手机连接」里显示的配对码。</p>
+      <label for="pair-code">配对码</label>
+      <input id="pair-code" name="pair-code" inputmode="numeric" pattern="[0-9]{8}" maxlength="8" placeholder="8 位数字" required>
+      <button class="primary" id="pair-submit">连接电脑</button>
+      <p class="notice" id="pair-notice" role="status" hidden></p>
+    </form>
+  </section>
+
+  <div class="workspace" id="workspace" hidden>
+    <button class="blanket" id="scrim" type="button" aria-label="收起会话列表" hidden></button>
+    <aside class="rail" id="rail" aria-label="会话列表">
+      <div class="brand">
+        <img src="/icons/192.png" width="34" height="34" alt="">
+        <div>NaroLink</div>
+        <button class="icon mobile-only" id="close-drawer" type="button" aria-label="收起会话列表">×</button>
+      </div>
+      <button id="new-chat" class="new-chat" type="button"><span aria-hidden="true">＋</span> 新建会话</button>
+      <div class="rail-title"><h2>会话</h2><button id="refresh" class="icon" type="button" aria-label="刷新历史" title="刷新历史">⟳</button></div>
+      <input class="search" id="session-search" type="search" aria-label="搜索会话" placeholder="搜索会话或目录">
+      <div class="filters" id="filters" aria-label="筛选引擎"></div>
+      <div class="rail-list">
+        <div id="running-list"></div>
+        <p id="inventory-notice" class="rail-notice" role="status" hidden></p>
+        <nav id="session-list" aria-label="本机历史"></nav>
+      </div>
+      <footer class="rail-footer">
+        <span class="connection" id="network-status">已连接电脑</span>
+        <button type="button" id="disconnect">解除配对</button>
+      </footer>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <button class="icon mobile-only" id="open-drawer" type="button" aria-label="打开会话列表" aria-expanded="false">☰</button>
+        <div class="top-title"><strong id="chat-title">新建会话</strong><span id="chat-path" hidden></span></div>
+        <span class="engine-label" id="active-provider"></span>
+        <button class="icon mobile-only" id="quick-new" type="button" aria-label="新建会话">＋</button>
+      </header>
+      <div class="conversation" id="conversation" tabindex="0" aria-label="聊天记录">
+        <div class="column">
+          <section class="welcome" id="new-view">
+            <h1>引擎</h1>
+            <div class="engine-grid" id="new-engines" aria-label="选择引擎"></div>
+            <label for="directory">工作目录</label>
+            <input id="directory" placeholder="电脑上的绝对路径" list="recent-folders" spellcheck="false">
+            <datalist id="recent-folders"></datalist>
+          </section>
+          <p class="notice" id="history-notice" role="status" hidden></p>
+          <div class="messages" id="messages"></div>
+          <div class="live" id="live" hidden></div>
+        </div>
+      </div>
+      <div class="composer-wrap">
+        <form class="composer" id="composer">
+          <div class="draft-files" id="draft-files" hidden></div>
+          <div class="compose-editor" id="compose-editor" data-text="">
+            <textarea id="prompt" rows="1" aria-label="消息" placeholder="你想做什么？"></textarea>
+          </div>
+          <div class="compose-actions">
+            <input id="image-files" type="file" accept="image/png,image/jpeg,image/gif,image/webp,.png,.jpg,.jpeg,.gif,.webp" multiple hidden>
+            <button class="image-button" id="add-images" type="button" title="添加图片">
+              <span class="paperclip" aria-hidden="true"></span><span>图片</span>
+            </button>
+            <label for="models" class="visually-hidden">模型</label>
+            <select id="models" aria-label="模型"><option value="">当前模型</option></select>
+            <button class="icon refresh-models" type="button" id="refresh-models" aria-label="刷新模型" title="刷新模型">⟳</button>
+            <span class="spacer"></span>
+            <button class="secondary" id="stop" type="button" hidden>停止</button>
+            <button class="primary" id="send" type="submit" disabled>发送</button>
+          </div>
+          <p class="compose-note" id="composer-notice" role="status" hidden></p>
+        </form>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,42 @@
+[package]
+name = "narolink"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "NaroLink — a workspace for local coding agents"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+directories = "6"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "persistence", "x11", "wayland"] }
+egui_commonmark = { version = "0.22", default-features = false }
+hmac = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+pulldown-cmark = { version = "0.13", default-features = false }
+rfd = "0.17"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["net", "rt-multi-thread", "time"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_JobObjects"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.release]
+strip = true

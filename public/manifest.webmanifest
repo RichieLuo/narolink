@@ -1,0 +1,15 @@
+{
+  "id": "/",
+  "name": "NaroLink",
+  "short_name": "NaroLink",
+  "description": "在电脑和手机上接续本机 CLI 会话",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f6fb",
+  "theme_color": "#202536",
+  "icons": [
+    {"src":"/icons/192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+    {"src":"/icons/512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ]
+}
