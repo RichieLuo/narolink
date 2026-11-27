@@ -1,8 +1,9 @@
-//! Desktop-only, read-only file previews. No contents are persisted or served over HTTP.
+//! Desktop UI for read-only file previews.
 use super::{
     Language, markdown,
     style::{Icon, Palette, lerp_color},
 };
+use crate::file_preview::{LoadResult, MAX_MARKDOWN_BYTES, TextFile, read_file};
 use eframe::egui::{
     self, Align, Align2, Button, FontId, Label, Layout, Margin, Rect, RichText, Stroke, TextEdit,
     Ui, pos2, vec2,
@@ -10,18 +11,13 @@ use eframe::egui::{
 use egui_commonmark::CommonMarkCache;
 use egui_extras::syntax_highlighting::{self, CodeTheme};
 use std::{
-    fs::File,
-    io::Read,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
 };
 
-const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_MARKDOWN_BYTES: usize = 256 * 1024;
 const MAX_HIGHLIGHT_BYTES: usize = 128 * 1024;
 const CODE_FONT_SIZE: f32 = 13.;
 const CODE_LINE_HEIGHT: f32 = 19.;
-type LoadResult = Result<TextFile, &'static str>;
 
 #[derive(Default)]
 pub(super) struct FileViewer {
@@ -37,17 +33,13 @@ struct Preview {
     cache: CommonMarkCache,
 }
 
-#[derive(Debug)]
-struct TextFile {
-    text: String,
-    markdown: bool,
-    syntax: String,
-    lines: usize,
-}
-
 impl FileViewer {
     pub(super) fn is_open(&self) -> bool {
         self.preview.is_some()
+    }
+
+    pub(super) fn close(&mut self) {
+        self.preview = None;
     }
 
     pub(super) fn open(&mut self, ctx: &egui::Context, path: PathBuf, workspace: &Path) {
@@ -399,160 +391,11 @@ fn render_source(ui: &mut Ui, file: &TextFile) -> egui::Response {
         .inner
 }
 
-fn read_file(path: &Path) -> LoadResult {
-    // Reject directories and special files before open (e.g. FIFOs can block).
-    let metadata = std::fs::metadata(path).map_err(file_error)?;
-    if metadata.is_dir() {
-        return Err("这是文件夹，请使用“在文件夹中显示”。");
-    }
-    if !metadata.is_file() {
-        return Err("仅支持预览普通文件。");
-    }
-    if metadata.len() > MAX_FILE_BYTES {
-        return Err("文件超过 2 MiB，暂不支持在应用内预览。");
-    }
-    let file = File::open(path).map_err(file_error)?;
-    let metadata = file.metadata().map_err(file_error)?;
-    if !metadata.is_file() {
-        return Err("仅支持预览普通文件。");
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(file_error)?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err("文件超过 2 MiB，暂不支持在应用内预览。");
-    }
-    let text = String::from_utf8(bytes).map_err(|_| "此文件不是 UTF-8 文本，暂不支持预览。")?;
-    if text
-        .chars()
-        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t' | '\u{c}'))
-    {
-        return Err("此文件是二进制文件，暂不支持预览。");
-    }
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let markdown = matches!(
-        extension.as_str(),
-        "md" | "markdown" | "mdown" | "mkd" | "mkdn"
-    );
-    let lines = text.bytes().filter(|&byte| byte == b'\n').count() + 1;
-    Ok(TextFile {
-        text,
-        markdown,
-        syntax: extension,
-        lines,
-    })
-}
-
-fn file_error(error: std::io::Error) -> &'static str {
-    match error.kind() {
-        std::io::ErrorKind::NotFound => "文件不存在或已被移动。",
-        std::io::ErrorKind::PermissionDenied => "没有权限读取此文件。",
-        _ => "无法读取文件，请刷新重试。",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_preview::tests::TestDirectory;
     use egui::{Event, Pos2, Rect, vec2};
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let path =
-                std::env::temp_dir().join(format!("naro-file-preview-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-
-        fn file(&self, name: &str, bytes: impl AsRef<[u8]>) -> PathBuf {
-            let path = self.0.join(name);
-            std::fs::write(&path, bytes).unwrap();
-            path
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn reads_markdown_code_and_extensionless_text_without_changing_contents() {
-        let dir = TestDirectory::new();
-        for name in [
-            "notes.MD",
-            "notes.markdown",
-            "notes.mdown",
-            "notes.mkd",
-            "notes.mkdn",
-        ] {
-            let source = "\u{feff}# Naro\r\n\r\n**文件预览**\r\n";
-            let path = dir.file(name, source);
-            let file = read_file(&path).unwrap();
-            assert!(file.markdown);
-            assert_eq!(file.text, source);
-            assert_eq!(std::fs::read_to_string(path).unwrap(), source);
-        }
-        for (name, syntax) in [("main.RS", "rs"), ("LICENSE", ""), ("empty.txt", "txt")] {
-            let file = read_file(&dir.file(name, "")).unwrap();
-            assert!(!file.markdown);
-            assert_eq!(file.syntax, syntax);
-            assert!(file.text.is_empty());
-        }
-    }
-
-    #[test]
-    fn rejects_missing_folders_binary_non_utf8_and_oversized_files() {
-        let dir = TestDirectory::new();
-        assert_eq!(
-            read_file(&dir.0.join("missing.md")).unwrap_err(),
-            "文件不存在或已被移动。"
-        );
-        assert_eq!(
-            read_file(&dir.0).unwrap_err(),
-            "这是文件夹，请使用“在文件夹中显示”。"
-        );
-        assert_eq!(
-            read_file(&dir.file("binary", b"PNG\0data")).unwrap_err(),
-            "此文件是二进制文件，暂不支持预览。"
-        );
-        assert_eq!(
-            read_file(&dir.file("invalid.txt", [0xff, 0xfe])).unwrap_err(),
-            "此文件不是 UTF-8 文本，暂不支持预览。"
-        );
-        let oversized = dir.file("huge.md", "");
-        File::options()
-            .write(true)
-            .open(&oversized)
-            .unwrap()
-            .set_len(MAX_FILE_BYTES + 1)
-            .unwrap();
-        assert_eq!(
-            read_file(&oversized).unwrap_err(),
-            "文件超过 2 MiB，暂不支持在应用内预览。"
-        );
-        assert_eq!(
-            file_error(std::io::ErrorKind::PermissionDenied.into()),
-            "没有权限读取此文件。"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_special_files_without_reading_them() {
-        assert_eq!(
-            read_file(Path::new("/dev/null")).unwrap_err(),
-            "仅支持预览普通文件。"
-        );
-    }
 
     fn loaded_viewer(path: PathBuf, result: LoadResult) -> FileViewer {
         let (_, inbox) = mpsc::channel();

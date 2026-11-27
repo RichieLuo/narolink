@@ -537,6 +537,38 @@ impl Service {
         Ok(result)
     }
 
+    pub fn git_status(&self, cwd: &Path) -> Result<crate::git::GitStatus, String> {
+        crate::git::status(cwd)
+    }
+
+    pub fn git_diff(
+        &self,
+        cwd: &Path,
+        request: &crate::git::GitDiffRequest,
+    ) -> Result<crate::git::GitDiff, String> {
+        crate::git::diff(cwd, request)
+    }
+
+    pub fn git_action(
+        &self,
+        cwd: &Path,
+        action: &crate::git::GitAction,
+    ) -> Result<crate::git::GitActionResult, String> {
+        crate::git::run_action(cwd, action)
+    }
+
+    pub fn git_generate_commit_message(
+        &self,
+        cwd: &Path,
+        amend: bool,
+        provider: Option<Provider>,
+        model: Option<&str>,
+        language: Option<&str>,
+    ) -> Result<String, String> {
+        let context = crate::git::commit_context(cwd, amend)?;
+        engine::title::generate_commit_message(provider, model, &context, language)
+    }
+
     pub fn start(&self, mut request: TurnRequest) -> Result<RunSummary, String> {
         let images = attachments::decode_uploads(std::mem::take(&mut request.images))
             .map_err(|error| error.to_string())?;

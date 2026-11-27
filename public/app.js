@@ -72,6 +72,8 @@ const scanVideo = $("scan-video");
 const scanStatus = $("scan-status");
 let scanSession = null;
 const settingsDialog = $("settings-dialog");
+const filePreviewDialog = $("file-preview");
+let filePreview = null;
 const quotaPage = $("quota-page");
 let usageSection = null;
 let tokenPeriod = "24h";
@@ -121,6 +123,7 @@ function applyLanguage(selected) {
     setConnection(!$("network-status").classList.contains("offline"));
     for (const field of questionForm?.fields ?? []) field.translate();
     paint();
+    if (typeof renderGit === "function") renderGit();
     if (usageSection) labelUsageRefresh();
     if (usageSection === "tokens") renderTokenUsage();
     else if (usageSection === "quota") loadQuota();
@@ -386,6 +389,7 @@ function setPaired(value, name) {
     drawer(false);
     closePicker();
     if (settingsDialog.open) settingsDialog.close();
+    if (filePreviewDialog.open) filePreviewDialog.close();
     syncQuotaPage();
     tokenReport = null;
     renderTokenUsage();
@@ -502,11 +506,47 @@ function renderTokenUsage() {
     details.replaceChildren();
     return;
   }
-  const cards = [tokenCard(t("总消耗"), period.total, period.providers.some(provider => provider.partial))];
-  for (const provider of period.providers) {
-    cards.push(tokenCard(engines[provider.provider].label, provider.counts, provider.partial));
+  const grandTotal = period.total ? period.total.input_tokens + period.total.output_tokens : 0;
+  const anyPartial = period.providers.some(provider => provider.partial);
+
+  const hero = element("section", "", "token-hero");
+  const heroHead = element("div", "", "token-hero-head");
+  heroHead.append(element("h2", t("总消耗")));
+  if (anyPartial) {
+    heroHead.append(element("p", t("部分 Token 记录暂不可用。"), "token-note"));
   }
-  details.replaceChildren(...cards);
+  hero.append(heroHead);
+  if (period.total) {
+    const total = element("strong", formatTokenCount(grandTotal), "token-total");
+    total.title = quotaAmount.format(grandTotal) + " Tokens";
+    total.append(element("small", "Tokens"));
+    hero.append(total);
+    if (grandTotal > 0) {
+      const bar = element("div", "", "token-share-bar");
+      bar.setAttribute("aria-hidden", "true");
+      for (const provider of period.providers) {
+        const count = provider.counts ? provider.counts.input_tokens + provider.counts.output_tokens : 0;
+        if (count <= 0) continue;
+        const seg = element("span", "", "token-share-seg");
+        seg.dataset.provider = provider.provider;
+        seg.style.flex = String(count);
+        const share = formatTokenShare(count, grandTotal);
+        seg.title = `${engines[provider.provider].label} · ${quotaAmount.format(count)} Tokens (${share})`;
+        bar.append(seg);
+      }
+      hero.append(bar);
+    }
+    hero.append(element("div", "", "token-hero-divider"), tokenMetricsList(period.total));
+  } else {
+    hero.append(element("p", t("暂无 Token 记录。"), "token-note"));
+  }
+
+  const sectionTitle = element("h2", t("各引擎明细"), "token-section-title");
+  const breakdown = element("section", "", "token-breakdown");
+  for (const provider of period.providers) {
+    breakdown.append(tokenProviderRow(provider, grandTotal));
+  }
+  details.replaceChildren(hero, sectionTitle, breakdown);
 }
 
 function formatTokenCount(count) {
@@ -518,32 +558,72 @@ function formatTokenCount(count) {
   return quotaAmount.format(hundredths / 100) + (billions ? "B" : "M");
 }
 
-function tokenCard(label, counts, partial = false) {
-  const card = element("section", "", "quota-group token-card");
-  card.append(element("h2", label));
+function formatTokenShare(part, total) {
+  if (!total || !part) return "";
+  const tenths = Math.round((part * 1000) / total);
+  if (tenths === 0) return "<0.1%";
+  return tenths % 10 === 0 ? `${tenths / 10}%` : `${(tenths / 10).toFixed(1)}%`;
+}
+
+function tokenMetricsList(counts) {
+  const metrics = element("dl", "", "token-metrics");
+  const fields = [
+    ["输入 Token", counts.input_tokens], ["输出 Token", counts.output_tokens],
+    ["缓存读取", counts.cache_read_tokens], ["缓存写入", counts.cache_write_tokens],
+  ];
+  for (const [name, count] of fields) {
+    const item = element("div");
+    const value = element("dd", formatTokenCount(count), count === 0 ? "is-zero" : "");
+    value.title = quotaAmount.format(count) + " Tokens";
+    item.append(element("dt", t(name)), value);
+    metrics.append(item);
+  }
+  return metrics;
+}
+
+function tokenProviderRow(provider, grandTotal) {
+  const row = element("div", "", "token-provider-row");
+  const counts = provider.counts;
+  const count = counts ? counts.input_tokens + counts.output_tokens : null;
+  const head = element("div", "", "token-provider-head");
+  const name = element("span", "", "token-provider-name");
+  const dot = element("span", "", count && count > 0 ? "token-dot" : "token-dot is-empty");
+  dot.dataset.provider = provider.provider;
+  dot.setAttribute("aria-hidden", "true");
+  name.append(dot, engines[provider.provider].label);
+  head.append(name);
+
+  if (count !== null) {
+    const right = element("span", "", "token-provider-total");
+    const share = formatTokenShare(count, grandTotal);
+    if (share) right.append(element("span", share, "token-share-pill"));
+    const value = element("strong", formatTokenCount(count), count === 0 ? "is-zero" : "");
+    value.title = quotaAmount.format(count) + " Tokens";
+    right.append(value, element("small", "Tokens"));
+    head.append(right);
+  } else {
+    head.append(element("span", t("暂无 Token 记录。"), "token-note"));
+  }
+  row.append(head);
+
   if (counts) {
-    const count = counts.input_tokens + counts.output_tokens;
-    const total = element("strong", formatTokenCount(count), "token-total");
-    total.title = quotaAmount.format(count) + " Tokens";
-    total.append(element("small", "Tokens"));
-    const metrics = element("dl", "", "token-metrics");
-    const fields = [
-      ["输入 Token", counts.input_tokens], ["输出 Token", counts.output_tokens],
-      ["缓存读取", counts.cache_read_tokens], ["缓存写入", counts.cache_write_tokens],
-    ];
-    for (const [name, count] of fields) {
-      const item = element("div");
-      const value = element("dd", formatTokenCount(count));
-      value.title = quotaAmount.format(count) + " Tokens";
-      item.append(element("dt", t(name)), value);
-      metrics.append(item);
+    if (grandTotal > 0) {
+      const bar = element("div", "", "token-row-bar");
+      bar.setAttribute("aria-hidden", "true");
+      if (count > 0) {
+        const fill = element("div", "", "token-row-bar-fill");
+        fill.dataset.provider = provider.provider;
+        fill.style.width = `${Math.max(1.2, (count / grandTotal) * 100)}%`;
+        bar.append(fill);
+      }
+      row.append(bar);
     }
-    card.append(total, metrics);
+    row.append(tokenMetricsList(counts));
   }
-  if (partial || !counts) {
-    card.append(element("p", t(partial ? "部分 Token 记录暂不可用。" : "暂无 Token 记录。"), "token-note"));
+  if (provider.partial) {
+    row.append(element("p", t("部分 Token 记录暂不可用。"), "token-note"));
   }
-  return card;
+  return row;
 }
 
 async function loadQuota() {
@@ -2267,6 +2347,7 @@ function renderHeader() {
   $("chat-details").hidden = isNew;
   $("new-view").hidden = !isNew;
   if (!isNew) closePicker();
+  if (typeof syncGitCwd === "function") syncGitCwd();
 }
 
 function appendInline(node, text) {
@@ -2335,10 +2416,80 @@ function renderedMarkup(text, html) {
   for (const link of body.querySelectorAll("a")) {
     const href = link.getAttribute("href");
     if (href?.startsWith("/api/")) link.href = scopedAsset(href);
-    openInNewTab(link);
+    const filePath = href?.match(/^\/api(\/file-previews\/[a-f0-9]{64})$/)?.[1];
+    if (filePath) {
+      link.setAttribute("aria-haspopup", "dialog");
+      link.addEventListener("click", event => {
+        event.preventDefault();
+        // A touch tap can leave the conversation focused. Avoid restoring it on close.
+        if (!filePreviewDialog.open && event.detail > 0 && document.activeElement === conversation) {
+          conversation.blur();
+        }
+        loadFilePreview(filePath);
+      });
+    } else {
+      openInNewTab(link);
+    }
   }
   return addCodeCopyButtons(body);
 }
+
+async function loadFilePreview(path, source = false) {
+  const preview = {path, source, file: null};
+  filePreview = preview;
+  const status = $("file-preview-notice");
+  const refresh = $("file-preview-refresh");
+  setText($("file-preview-title"), t("文件预览"));
+  $("file-preview-content").replaceChildren();
+  $("file-preview-copy").replaceChildren();
+  $("file-preview-modes").hidden = true;
+  refresh.disabled = true;
+  notice(status, "正在读取文件…");
+  if (!filePreviewDialog.open) filePreviewDialog.showModal();
+  try {
+    const file = await api(path);
+    if (filePreview !== preview || !filePreviewDialog.open) return;
+    preview.file = file;
+    setText($("file-preview-title"), file.name);
+    $("file-preview-copy").append(copyTextButton(file.text, "复制文件内容", () =>
+      notice(status, "选中文件内容即可复制。")));
+    notice(status, "");
+    showFilePreview(source);
+  } catch (error) {
+    if (filePreview === preview && filePreviewDialog.open) notice(status, error.message);
+  } finally {
+    if (filePreview === preview) refresh.disabled = false;
+  }
+}
+
+function showFilePreview(source) {
+  const {file} = filePreview;
+  if (!file) return;
+  filePreview.source = source;
+  const canRender = typeof file.html === "string";
+  $("file-preview-modes").hidden = !canRender;
+  $("file-preview-rendered").setAttribute("aria-pressed", String(!source));
+  $("file-preview-source").setAttribute("aria-pressed", String(source));
+  const content = $("file-preview-content");
+  if (canRender && !source) {
+    content.replaceChildren(renderedMarkup(file.text, file.html));
+  } else {
+    content.replaceChildren(element("pre", file.text, "file-preview-raw"));
+  }
+  $("file-preview-scroll").scrollTo(0, 0);
+}
+
+$("file-preview-close").addEventListener("click", () => filePreviewDialog.close());
+$("file-preview-refresh").addEventListener("click", () => loadFilePreview(filePreview.path, filePreview.source));
+$("file-preview-rendered").addEventListener("click", () => showFilePreview(false));
+$("file-preview-source").addEventListener("click", () => showFilePreview(true));
+filePreviewDialog.addEventListener("close", () => {
+  if (filePreviewDialog.open) return;
+  filePreview = null;
+  $("file-preview-content").replaceChildren();
+  $("file-preview-copy").replaceChildren();
+  notice($("file-preview-notice"), "");
+});
 
 function addCodeCopyButtons(body) {
   for (const code of body.querySelectorAll("pre > code")) {
@@ -2422,7 +2573,7 @@ function message(role, text, {rendered, work, key, running = false, attachments,
   return row;
 }
 
-function copyTextButton(text, label = "复制") {
+function copyTextButton(text, label = "复制", onFailure = () => notice(composerNotice, "可选中消息文字后复制。")) {
   const control = button("", "message-copy", async () => {
     try {
       await navigator.clipboard.writeText(text);
@@ -2430,7 +2581,7 @@ function copyTextButton(text, label = "复制") {
       clearTimeout(timer);
       timer = setTimeout(() => showCopied(false), 1800);
     } catch {
-      notice(composerNotice, "可选中消息文字后复制。");
+      onFailure();
     }
   });
   let timer;
@@ -3523,9 +3674,21 @@ function bindSettingsDropdown(trigger, choose) {
     option.scrollIntoView({block: "nearest"});
   }
 
+  function position() {
+    list.classList.remove("is-up");
+    const dialogRect = settingsDialog.getBoundingClientRect();
+    const triggerRect = trigger.getBoundingClientRect();
+    const spaceBelow = dialogRect.bottom - triggerRect.bottom;
+    const spaceAbove = triggerRect.top - dialogRect.top;
+    if (spaceBelow < list.offsetHeight + 12 && spaceAbove > spaceBelow) {
+      list.classList.add("is-up");
+    }
+  }
+
   function open() {
     trigger.focus({preventScroll: true});
     list.hidden = false;
+    position();
     trigger.setAttribute("aria-expanded", "true");
     highlight(selectedIndex);
   }
@@ -3533,6 +3696,7 @@ function bindSettingsDropdown(trigger, choose) {
   function close() {
     if (list.hidden) return;
     list.hidden = true;
+    list.classList.remove("is-up");
     trigger.setAttribute("aria-expanded", "false");
     trigger.removeAttribute("aria-activedescendant");
     options[activeIndex].classList.remove("is-active");
@@ -3570,7 +3734,7 @@ function bindSettingsDropdown(trigger, choose) {
     if (option) commit(option);
   });
   settingsDialog.addEventListener("click", event => {
-    if (!trigger.parentElement.contains(event.target)) close();
+    if (!trigger.parentElement.contains(event.target) && ![...(trigger.labels ?? [])].some(label => label.contains(event.target))) close();
   });
   settingsDialog.addEventListener("cancel", event => {
     if (list.hidden) return;
@@ -3718,6 +3882,7 @@ window.addEventListener("resize", positionPicker);
 $("directory").addEventListener("input", () => {
   view.cwd = $("directory").value;
   renderControls();
+  if (typeof syncGitCwd === "function") syncGitCwd();
 });
 for (const [trigger, panel] of composerSettings) {
   trigger.addEventListener("click", () => {
@@ -3756,7 +3921,11 @@ $("close-drawer").addEventListener("click", () => { drawer(false); $("open-drawe
 $("scrim").addEventListener("click", () => { drawer(false); $("open-drawer").focus(); });
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape" || deviceDialog.open || scanDialog.open || settingsDialog.open || !quotaPage.hidden) return;
-  if (closeComposerSettings(true)) {
+  if (typeof gitState !== "undefined" && gitState.open) {
+    closeGitDrawer();
+    $("git-toggle").focus();
+    event.preventDefault();
+  } else if (closeComposerSettings(true)) {
     event.preventDefault();
   } else if (!$("scrim").hidden) {
     drawer(false);
@@ -3867,6 +4036,612 @@ async function initialize(code = takePairingCode()) {
 }
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+// Git workspace drawer
+const gitState = {
+  open: false,
+  cwd: "",
+  tab: "changes",
+  status: null,
+  loading: false,
+  pending: false,
+  generatingMessage: false,
+  serial: 0,
+  diffSerial: 0,
+  generateSerial: 0,
+  error: "",
+  notice: "",
+  commitMessage: "",
+  amend: false,
+  newBranch: "",
+  selectedDiff: null,
+  diff: null,
+  diffLoading: false,
+  diffError: "",
+  confirmDiscard: null,
+};
+
+function currentGitCwd() {
+  return (view.data?.cwd || view.cwd || "").trim();
+}
+
+function updateGitTrigger() {
+  const trigger = $("git-toggle");
+  const cwd = currentGitCwd();
+  trigger.hidden = !cwd;
+  trigger.setAttribute("aria-expanded", String(gitState.open));
+  let label = "Git";
+  if (gitState.status?.is_repo && gitState.cwd === cwd) {
+    const st = gitState.status;
+    const branch = st.branch || st.head_short || "Git";
+    const total = (st.staged?.length || 0) + (st.unstaged?.length || 0) + (st.untracked?.length || 0) + (st.conflicted?.length || 0);
+    const shortBranch = branch.length > 16 ? branch.slice(0, 15) + "…" : branch;
+    label = total > 0 ? `${shortBranch} · ${total}` : shortBranch;
+  }
+  setText($("git-toggle-label"), label);
+}
+
+function syncGitCwd() {
+  const cwd = currentGitCwd();
+  if (gitState.cwd !== cwd) {
+    gitState.cwd = cwd;
+    gitState.status = null;
+    gitState.error = "";
+    gitState.notice = "";
+    gitState.selectedDiff = null;
+    gitState.diff = null;
+    gitState.diffError = "";
+    gitState.diffLoading = false;
+    gitState.confirmDiscard = null;
+    gitState.generatingMessage = false;
+    gitState.serial += 1;
+    gitState.diffSerial += 1;
+    gitState.generateSerial += 1;
+    if (gitState.open) {
+      if (cwd) refreshGitStatus();
+      else renderGit();
+    }
+  }
+  updateGitTrigger();
+}
+
+function openGitDrawer() {
+  const cwd = currentGitCwd();
+  if (!cwd) return;
+  gitState.open = true;
+  gitState.cwd = cwd;
+  $("git-drawer").hidden = false;
+  $("git-backdrop").hidden = false;
+  updateGitTrigger();
+  refreshGitStatus();
+}
+
+function closeGitDrawer() {
+  gitState.open = false;
+  gitState.confirmDiscard = null;
+  $("git-drawer").hidden = true;
+  $("git-backdrop").hidden = true;
+  updateGitTrigger();
+}
+
+async function refreshGitStatus() {
+  const cwd = currentGitCwd();
+  if (!cwd) {
+    renderGit();
+    return;
+  }
+  gitState.cwd = cwd;
+  const serial = ++gitState.serial;
+  gitState.loading = true;
+  gitState.error = "";
+  renderGit();
+  try {
+    const query = new URLSearchParams({cwd}).toString();
+    const status = await api("/git/status?" + query);
+    if (serial !== gitState.serial) return;
+    gitState.loading = false;
+    gitState.status = status;
+    pruneGitSelectedDiff(status);
+    renderGit();
+    updateGitTrigger();
+  } catch (problem) {
+    if (serial !== gitState.serial) return;
+    gitState.loading = false;
+    gitState.error = problem.message || t("无法读取 Git 状态");
+    renderGit();
+  }
+}
+
+function pruneGitSelectedDiff(status) {
+  const sel = gitState.selectedDiff;
+  if (!sel || !status?.is_repo) {
+    gitState.selectedDiff = null;
+    gitState.diff = null;
+    return;
+  }
+  const keep = sel.scope === "staged"
+    ? (status.staged || []).some(item => item.path === sel.path)
+    : sel.scope === "unstaged"
+      ? (status.unstaged || []).some(item => item.path === sel.path) || (status.conflicted || []).some(item => item.path === sel.path)
+      : sel.scope === "untracked"
+        ? (status.untracked || []).some(item => item.path === sel.path)
+        : (status.commits || []).some(item => item.hash === sel.commit);
+  if (!keep) {
+    gitState.selectedDiff = null;
+    gitState.diff = null;
+    gitState.diffError = "";
+    gitState.diffLoading = false;
+  }
+}
+
+async function loadGitDiff(selection) {
+  const cwd = gitState.cwd || currentGitCwd();
+  if (!cwd) return;
+  gitState.selectedDiff = selection;
+  const serial = ++gitState.diffSerial;
+  gitState.diffLoading = true;
+  gitState.diffError = "";
+  gitState.diff = null;
+  renderGit();
+  try {
+    const params = new URLSearchParams({cwd, scope: selection.scope});
+    if (selection.path) params.set("path", selection.path);
+    if (selection.commit) params.set("commit", selection.commit);
+    const diff = await api("/git/diff?" + params.toString());
+    if (serial !== gitState.diffSerial) return;
+    gitState.diffLoading = false;
+    gitState.diff = diff;
+    renderGit();
+  } catch (problem) {
+    if (serial !== gitState.diffSerial) return;
+    gitState.diffLoading = false;
+    gitState.diffError = problem.message || t("无法读取文件差异");
+    renderGit();
+  }
+}
+
+async function runGitAction(action) {
+  if (gitState.pending || gitState.generatingMessage) return;
+  const cwd = gitState.cwd || currentGitCwd();
+  if (!cwd) return;
+  const serial = ++gitState.serial;
+  gitState.pending = true;
+  gitState.error = "";
+  gitState.notice = "";
+  renderGit();
+  try {
+    const result = await api("/git/action", {cwd, ...action});
+    if (serial !== gitState.serial) return;
+    gitState.pending = false;
+    gitState.confirmDiscard = null;
+    gitState.notice = result.summary || "";
+    if (action.action === "commit") {
+      gitState.commitMessage = "";
+      gitState.amend = false;
+    }
+    if (action.action === "create_branch") {
+      gitState.newBranch = "";
+    }
+    gitState.status = result.status;
+    pruneGitSelectedDiff(result.status);
+    renderGit();
+    updateGitTrigger();
+    if (gitState.selectedDiff) loadGitDiff(gitState.selectedDiff);
+  } catch (problem) {
+    if (serial !== gitState.serial) return;
+    gitState.pending = false;
+    gitState.error = problem.message || t("操作失败");
+    renderGit();
+  }
+}
+
+async function generateGitCommitMessage() {
+  if (gitState.pending || gitState.generatingMessage) return;
+  const cwd = gitState.cwd || currentGitCwd();
+  if (!cwd) return;
+  const serial = ++gitState.generateSerial;
+  gitState.generatingMessage = true;
+  gitState.error = "";
+  gitState.notice = "";
+  renderGit();
+  try {
+    const result = await api("/git/commit-message", {
+      cwd,
+      amend: gitState.amend,
+      provider: view.provider,
+      model: selectedModel(view) || null,
+      language,
+    });
+    if (serial !== gitState.generateSerial) return;
+    gitState.generatingMessage = false;
+    gitState.commitMessage = result.message || "";
+    gitState.notice = "已生成提交信息";
+    renderGit();
+  } catch (problem) {
+    if (serial !== gitState.generateSerial) return;
+    gitState.generatingMessage = false;
+    gitState.error = problem.message || t("操作失败");
+    renderGit();
+  }
+}
+
+function gitStatusClass(code) {
+  if (code === "A" || code === "?") return "is-added";
+  if (code === "D") return "is-removed";
+  if (code.length > 1) return "is-conflict";
+  return "is-modified";
+}
+
+function renderGitDiffCard() {
+  const card = element("section", "", "git-diff-card");
+  const head = element("div", "", "git-diff-head");
+  const title = gitState.diff?.title || gitState.selectedDiff?.path || gitState.selectedDiff?.commit?.slice(0, 12) || "";
+  head.append(element("span", title, "git-diff-title"));
+  const meta = element("div", "", "git-diff-meta");
+  if (gitState.diff) {
+    if (gitState.diff.added > 0) meta.append(element("span", "+" + gitState.diff.added, "change-added"));
+    if (gitState.diff.removed > 0) meta.append(element("span", "-" + gitState.diff.removed, "change-removed"));
+  }
+  const closeBtn = element("button", "×", "git-icon-btn");
+  closeBtn.type = "button";
+  closeBtn.setAttribute("aria-label", t("关闭差异"));
+  closeBtn.addEventListener("click", () => {
+    gitState.selectedDiff = null;
+    gitState.diff = null;
+    gitState.diffError = "";
+    gitState.diffLoading = false;
+    renderGit();
+  });
+  meta.append(closeBtn);
+  head.append(meta);
+  card.append(head);
+
+  if (gitState.diffLoading) {
+    card.append(element("p", t("正在加载差异…"), "session-hint"));
+  } else if (gitState.diffError) {
+    card.append(element("p", gitState.diffError, "notice"));
+  } else if (gitState.diff?.binary) {
+    card.append(element("p", t("二进制文件，无法显示文本差异。"), "session-hint"));
+  } else if (!gitState.diff?.diff) {
+    card.append(element("p", t("没有文本差异。"), "session-hint"));
+  } else {
+    card.append(fileDiff({
+      diff: gitState.diff.diff,
+      added: gitState.diff.added,
+      removed: gitState.diff.removed,
+      truncated: gitState.diff.truncated,
+    }));
+  }
+  return card;
+}
+
+function renderGitFileGroup(title, files, kind) {
+  const frag = document.createDocumentFragment();
+  const header = element("div", "", "git-group-header");
+  header.append(element("h3", `${title} (${files.length})`));
+  if (kind === "staged") {
+    const btn = element("button", t("全部取消暂存"), "git-link-btn is-muted");
+    btn.type = "button";
+    btn.disabled = gitState.pending;
+    btn.addEventListener("click", () => runGitAction({action: "unstage", paths: []}));
+    header.append(btn);
+  } else if (kind === "unstaged" || kind === "untracked") {
+    const btn = element("button", t("全部暂存"), "git-link-btn");
+    btn.type = "button";
+    btn.disabled = gitState.pending;
+    btn.addEventListener("click", () => runGitAction({action: "stage", paths: files.map(item => item.path)}));
+    header.append(btn);
+  }
+  frag.append(header);
+
+  const list = element("div", "", "git-file-list");
+  for (const file of files) {
+    const scope = kind === "staged" ? "staged" : kind === "untracked" ? "untracked" : "unstaged";
+    const selected = gitState.selectedDiff?.scope === scope && gitState.selectedDiff?.path === file.path;
+    const confirming = gitState.confirmDiscard?.path === file.path && gitState.confirmDiscard?.untracked === (kind === "untracked");
+    const row = element("div", "", "git-file-row" + (selected ? " is-selected" : ""));
+    row.append(element("span", file.status, "git-status-badge " + gitStatusClass(file.status)));
+    const display = file.orig_path ? `${file.orig_path} → ${file.path}` : file.path;
+    const nameBtn = element("button", display, "git-file-name");
+    nameBtn.type = "button";
+    nameBtn.title = display;
+    nameBtn.addEventListener("click", () => loadGitDiff({scope, path: file.path}));
+    row.append(nameBtn);
+
+    const actions = element("div", "", "git-row-actions");
+    if (confirming) {
+      const yes = element("button", t("确认丢弃"), "git-link-btn is-danger");
+      yes.type = "button";
+      yes.disabled = gitState.pending;
+      yes.addEventListener("click", () => runGitAction({action: "discard", paths: [file.path], untracked: kind === "untracked"}));
+      const no = element("button", t("取消"), "git-link-btn is-muted");
+      no.type = "button";
+      no.disabled = gitState.pending;
+      no.addEventListener("click", () => { gitState.confirmDiscard = null; renderGit(); });
+      actions.append(yes, no);
+    } else if (kind === "staged") {
+      const unstage = element("button", "−", "git-icon-btn");
+      unstage.type = "button";
+      unstage.title = t("取消暂存");
+      unstage.setAttribute("aria-label", t("取消暂存"));
+      unstage.disabled = gitState.pending;
+      unstage.addEventListener("click", () => runGitAction({action: "unstage", paths: [file.path]}));
+      actions.append(unstage);
+    } else {
+      const stage = element("button", "+", "git-icon-btn is-add");
+      stage.type = "button";
+      stage.title = t("暂存");
+      stage.setAttribute("aria-label", t("暂存"));
+      stage.disabled = gitState.pending;
+      stage.addEventListener("click", () => runGitAction({action: "stage", paths: [file.path]}));
+      actions.append(stage);
+      if (kind === "unstaged" || kind === "untracked") {
+        const discard = element("button", "↩", "git-icon-btn is-danger");
+        discard.type = "button";
+        discard.title = t("丢弃更改");
+        discard.setAttribute("aria-label", t("丢弃更改"));
+        discard.disabled = gitState.pending;
+        discard.addEventListener("click", () => {
+          gitState.confirmDiscard = {path: file.path, untracked: kind === "untracked"};
+          renderGit();
+        });
+        actions.append(discard);
+      }
+    }
+    row.append(actions);
+    list.append(row);
+  }
+  frag.append(list);
+  return frag;
+}
+
+function renderGit() {
+  updateGitTrigger();
+  if (!gitState.open) return;
+  const st = gitState.status;
+  const isRepo = Boolean(st?.is_repo);
+  setText($("git-repo-name"), isRepo ? (st.repo_name || "Git") : "Git");
+
+  const branchPill = $("git-branch-pill");
+  if (isRepo) {
+    setText(branchPill, st.detached ? `HEAD ${st.head_short || ""}`.trim() : (st.branch || "HEAD"));
+    branchPill.hidden = false;
+  } else {
+    branchPill.hidden = true;
+  }
+
+  const ab = $("git-ahead-behind");
+  if (isRepo && (st.ahead > 0 || st.behind > 0)) {
+    const parts = [];
+    if (st.ahead > 0) parts.push("↑" + st.ahead);
+    if (st.behind > 0) parts.push("↓" + st.behind);
+    setText(ab, parts.join(" "));
+    ab.hidden = false;
+  } else {
+    ab.hidden = true;
+  }
+
+  $("git-refresh").classList.toggle("is-spinning", gitState.loading || gitState.pending);
+  $("git-refresh").disabled = gitState.pending;
+
+  const totalChanges = isRepo
+    ? (st.staged?.length || 0) + (st.unstaged?.length || 0) + (st.untracked?.length || 0) + (st.conflicted?.length || 0)
+    : 0;
+  const branchesCount = isRepo ? (st.branches?.length || 0) : 0;
+  setText($("git-tab-changes"), totalChanges > 0 ? `${t("变更")} (${totalChanges})` : t("变更"));
+  setText($("git-tab-branches"), branchesCount > 0 ? `${t("分支")} (${branchesCount})` : t("分支"));
+  setText($("git-tab-history"), t("历史"));
+  for (const tabBtn of $("git-tabs").querySelectorAll(".git-tab")) {
+    tabBtn.setAttribute("aria-selected", String(tabBtn.dataset.tab === gitState.tab));
+  }
+
+  const sync = $("git-sync");
+  const hasRemotes = isRepo && (st.remotes?.length || 0) > 0;
+  sync.hidden = !isRepo;
+  for (const id of ["git-fetch", "git-pull", "git-push"]) {
+    $(id).disabled = gitState.pending || !hasRemotes;
+  }
+
+  const errorBanner = $("git-error");
+  errorBanner.hidden = !gitState.error;
+  if (gitState.error) setText(errorBanner, gitState.error);
+
+  const noticeBanner = $("git-notice");
+  noticeBanner.hidden = Boolean(gitState.error) || !gitState.notice;
+  if (gitState.notice) setText(noticeBanner, t(gitState.notice));
+
+  const body = $("git-body");
+  body.replaceChildren();
+
+  if (!gitState.cwd) {
+    body.append(element("p", t("请先选择工作目录。"), "git-empty"));
+    return;
+  }
+  if (!st) {
+    body.append(element("p", t(gitState.loading ? "正在读取 Git 状态…" : "无法读取 Git 状态"), "git-empty"));
+    return;
+  }
+  if (!st.is_repo) {
+    body.append(element("p", t("当前工作目录不是 Git 仓库。"), "git-empty"));
+    return;
+  }
+
+  if (gitState.tab === "changes") {
+    const busy = gitState.pending || gitState.generatingMessage;
+    const form = element("form", "", "git-card");
+    const textarea = element("textarea", "", "git-commit-input");
+    textarea.placeholder = t("输入提交信息…");
+    textarea.value = gitState.commitMessage;
+    textarea.disabled = busy;
+    const syncButtons = () => {
+      commitBtn.disabled = busy || (!gitState.amend && !gitState.commitMessage.trim()) || (!st.staged?.length && !gitState.amend);
+      aiBtn.disabled = busy || (totalChanges === 0 && !(gitState.amend && st.commits?.length));
+    };
+    textarea.addEventListener("input", () => {
+      gitState.commitMessage = textarea.value;
+      syncButtons();
+    });
+    const bar = element("div", "", "git-commit-bar");
+    const amendLabel = element("label", "", "compact-check");
+    const amendInput = element("input");
+    amendInput.type = "checkbox";
+    amendInput.checked = gitState.amend;
+    amendInput.disabled = busy || !(st.commits?.length);
+    amendInput.addEventListener("change", () => {
+      gitState.amend = amendInput.checked;
+      syncButtons();
+    });
+    amendLabel.append(amendInput, element("span", t("修正上次提交")));
+
+    const actions = element("div", "", "git-commit-actions");
+    const aiBtn = element("button", "", "git-ai-btn");
+    aiBtn.type = "button";
+    aiBtn.title = t("使用 AI 生成提交信息");
+    aiBtn.setAttribute("aria-label", t("使用 AI 生成提交信息"));
+    const aiIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    aiIcon.setAttribute("width", "14");
+    aiIcon.setAttribute("height", "14");
+    aiIcon.setAttribute("viewBox", "0 0 16 16");
+    aiIcon.setAttribute("fill", "none");
+    aiIcon.setAttribute("stroke", "currentColor");
+    aiIcon.setAttribute("stroke-width", "1.45");
+    aiIcon.setAttribute("stroke-linecap", "round");
+    aiIcon.setAttribute("stroke-linejoin", "round");
+    aiIcon.setAttribute("aria-hidden", "true");
+    const bolt = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    bolt.setAttribute("d", "M9 1.75 3.75 9H8l-1 5.25L12.25 7H8l1-5.25Z");
+    aiIcon.append(bolt);
+    aiBtn.append(aiIcon, element("span", t(gitState.generatingMessage ? "生成中…" : "AI 生成")));
+    aiBtn.addEventListener("click", generateGitCommitMessage);
+
+    const commitBtn = element("button", t("提交"), "primary");
+    commitBtn.type = "submit";
+    syncButtons();
+    actions.append(aiBtn, commitBtn);
+    bar.append(amendLabel, actions);
+    form.append(textarea, bar);
+    if (!st.staged?.length && !gitState.amend && totalChanges > 0) {
+      form.append(element("p", t("暂存更改后再提交。"), "session-hint"));
+    }
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      if (commitBtn.disabled) return;
+      runGitAction({action: "commit", message: gitState.commitMessage, amend: gitState.amend});
+    });
+    body.append(form);
+
+    if (totalChanges === 0) {
+      body.append(element("p", t("工作区干净，没有未提交更改。"), "git-empty"));
+    } else {
+      if (st.truncated) body.append(element("p", t("更改文件较多，仅显示部分条目。"), "session-hint"));
+      if (st.conflicted?.length) body.append(renderGitFileGroup(t("合并冲突"), st.conflicted, "conflicted"));
+      if (st.staged?.length) body.append(renderGitFileGroup(t("已暂存"), st.staged, "staged"));
+      if (st.unstaged?.length) body.append(renderGitFileGroup(t("更改"), st.unstaged, "unstaged"));
+      if (st.untracked?.length) body.append(renderGitFileGroup(t("未跟踪"), st.untracked, "untracked"));
+    }
+    if (gitState.selectedDiff && gitState.selectedDiff.scope !== "commit") {
+      body.append(renderGitDiffCard());
+    }
+  } else if (gitState.tab === "branches") {
+    const createCard = element("form", "", "git-card");
+    createCard.append(element("span", t("新建分支"), "session-hint"));
+    const row = element("div", "", "git-branch-form");
+    const input = element("input");
+    input.placeholder = t("输入新分支名称");
+    input.value = gitState.newBranch;
+    input.disabled = gitState.pending;
+    input.spellcheck = false;
+    const createBtn = element("button", t("创建并切换"), "secondary");
+    createBtn.type = "submit";
+    createBtn.disabled = gitState.pending || !gitState.newBranch.trim();
+    input.addEventListener("input", () => {
+      gitState.newBranch = input.value;
+      createBtn.disabled = gitState.pending || !gitState.newBranch.trim();
+    });
+    createCard.addEventListener("submit", event => {
+      event.preventDefault();
+      if (createBtn.disabled) return;
+      runGitAction({action: "create_branch", name: gitState.newBranch.trim(), checkout: true});
+    });
+    row.append(input, createBtn);
+    createCard.append(row);
+    body.append(createCard);
+
+    if (!st.branches?.length) {
+      body.append(element("p", t("暂无分支。"), "git-empty"));
+    } else {
+      for (const branch of st.branches) {
+        const card = element("div", "", "git-item-card" + (branch.current ? " is-current" : ""));
+        const top = element("div", "", "git-item-top");
+        const nameWrap = element("div", "", "git-item-name");
+        nameWrap.append(element("span", branch.name));
+        if (branch.commit_short) nameWrap.append(element("span", branch.commit_short, "git-hash"));
+        top.append(nameWrap);
+        if (branch.current) {
+          top.append(element("span", t("当前分支"), "git-branch-pill"));
+        } else {
+          const sw = element("button", t("切换"), "git-mini-btn");
+          sw.type = "button";
+          sw.disabled = gitState.pending;
+          sw.addEventListener("click", () => runGitAction({action: "checkout", branch: branch.name}));
+          top.append(sw);
+        }
+        card.append(top);
+        if (branch.upstream || branch.subject) {
+          const meta = element("div", "", "git-item-meta");
+          if (branch.upstream) {
+            let up = branch.upstream;
+            if (branch.ahead > 0) up += ` ↑${branch.ahead}`;
+            if (branch.behind > 0) up += ` ↓${branch.behind}`;
+            meta.append(element("span", up, "git-hash"));
+          }
+          if (branch.subject) meta.append(element("span", branch.subject));
+          card.append(meta);
+        }
+        body.append(card);
+      }
+    }
+  } else if (gitState.tab === "history") {
+    if (!st.commits?.length) {
+      body.append(element("p", t("暂无提交记录。"), "git-empty"));
+    } else {
+      for (const commit of st.commits) {
+        const selected = gitState.selectedDiff?.scope === "commit" && gitState.selectedDiff?.commit === commit.hash;
+        const card = element("div", "", "git-item-card" + (selected ? " is-selected" : ""));
+        const btn = element("button", "", "git-commit-btn");
+        btn.type = "button";
+        btn.append(element("span", commit.subject || commit.short_hash, "git-commit-subject"));
+        const meta = element("div", "", "git-item-meta");
+        meta.append(element("span", commit.short_hash, "git-hash"), element("span", commit.author), element("span", commit.relative_date));
+        btn.append(meta);
+        btn.addEventListener("click", () => loadGitDiff({scope: "commit", commit: commit.hash}));
+        card.append(btn);
+        body.append(card);
+      }
+    }
+    if (gitState.selectedDiff?.scope === "commit") {
+      body.append(renderGitDiffCard());
+    }
+  }
+}
+
+$("git-toggle").addEventListener("click", () => {
+  if (gitState.open) closeGitDrawer();
+  else openGitDrawer();
+});
+$("git-close").addEventListener("click", closeGitDrawer);
+$("git-backdrop").addEventListener("click", closeGitDrawer);
+$("git-refresh").addEventListener("click", refreshGitStatus);
+$("git-fetch").addEventListener("click", () => runGitAction({action: "fetch"}));
+$("git-pull").addEventListener("click", () => runGitAction({action: "pull"}));
+$("git-push").addEventListener("click", () => runGitAction({action: "push"}));
+for (const tabBtn of $("git-tabs").querySelectorAll(".git-tab")) {
+  tabBtn.addEventListener("click", () => {
+    gitState.tab = tabBtn.dataset.tab;
+    renderGit();
+  });
+}
+
 applyLanguage(defaultLanguage);
 initializeLanguage();
 initialize();

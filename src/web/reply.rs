@@ -2,6 +2,7 @@ use crate::engine::attachments::{
     HistoryImage, ImageAttachment, InlineImage, MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_SOURCE_BYTES,
     UserAttachment,
 };
+use crate::file_preview::{MAX_MARKDOWN_BYTES, local_file, read_file};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, html};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -43,16 +44,25 @@ pub(super) struct AttachmentPreview {
     url: Option<String>,
 }
 
+#[derive(Serialize)]
+pub(super) struct FilePreview {
+    name: String,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    html: Option<String>,
+}
+
 #[derive(Clone)]
 enum PreviewSource {
     File { path: PathBuf, root: PathBuf },
+    Text { path: PathBuf, root: PathBuf },
     Inline(InlineImage),
 }
 
 impl PreviewSource {
     fn encoded_len(&self) -> usize {
         match self {
-            Self::File { .. } => 0,
+            Self::File { .. } | Self::Text { .. } => 0,
             Self::Inline(image) => image.encoded_len(),
         }
     }
@@ -69,10 +79,19 @@ struct PreviewCache {
     encoded_bytes: usize,
 }
 
+impl PreviewCache {
+    fn source(&mut self, key: &str) -> Option<PreviewSource> {
+        let entry = self.entries.get_mut(key)?;
+        entry.touched = Instant::now();
+        Some(entry.source.clone())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Previews {
     nonce: uuid::Uuid,
     cache: Mutex<PreviewCache>,
+    documents: Mutex<PreviewCache>,
 }
 
 impl Previews {
@@ -97,14 +116,8 @@ impl Previews {
 
     fn register(&self, root: &Path, path: PathBuf) -> Option<Preview> {
         let name = path.file_name()?.to_string_lossy().into_owned();
-        let mut hash = Sha256::new();
-        hash.update(self.nonce.as_bytes());
-        hash.update(root.as_os_str().as_encoded_bytes());
-        hash.update([0]);
-        hash.update(path.as_os_str().as_encoded_bytes());
-        let key = format!("{:x}", hash.finalize());
         let url = self.insert(
-            key,
+            self.file_key(root, &path),
             PreviewSource::File {
                 path,
                 root: root.to_owned(),
@@ -113,21 +126,35 @@ impl Previews {
         Some(Preview { url, name })
     }
 
+    fn file_key(&self, root: &Path, path: &Path) -> String {
+        let mut hash = Sha256::new();
+        hash.update(self.nonce.as_bytes());
+        hash.update(root.as_os_str().as_encoded_bytes());
+        hash.update([0]);
+        hash.update(path.as_os_str().as_encoded_bytes());
+        format!("{:x}", hash.finalize())
+    }
+
     fn insert(&self, key: String, source: PreviewSource) -> String {
         let now = Instant::now();
-        let mut cache = self.cache.lock().unwrap();
+        let (cache, max_entries, route) = if matches!(&source, PreviewSource::Text { .. }) {
+            (&self.documents, 2048, "/api/file-previews")
+        } else {
+            (&self.cache, 512, "/api/previews")
+        };
+        let mut cache = cache.lock().unwrap();
         if let Some(entry) = cache.entries.get_mut(&key) {
             entry.touched = now;
         } else {
             let size = source.encoded_len();
-            while cache.entries.len() >= 512
+            while cache.entries.len() >= max_entries
                 || cache.encoded_bytes + size > 2 * MAX_ENCODED_IMAGE_BYTES
             {
                 let Some(oldest) = cache
                     .entries
                     .iter()
                     .filter(|(_, entry)| {
-                        cache.entries.len() >= 512 || entry.source.encoded_len() > 0
+                        cache.entries.len() >= max_entries || entry.source.encoded_len() > 0
                     })
                     .min_by_key(|(_, entry)| entry.touched)
                     .map(|(key, _)| key.clone())
@@ -145,7 +172,7 @@ impl Previews {
                 },
             );
         }
-        format!("/api/previews/{key}")
+        format!("{route}/{key}")
     }
 
     pub(super) fn user_attachment(&self, attachment: &UserAttachment) -> AttachmentPreview {
@@ -173,12 +200,7 @@ impl Previews {
     }
 
     pub(super) fn image(&self, key: &str) -> Option<ImageAttachment> {
-        let source = {
-            let mut cache = self.cache.lock().unwrap();
-            let entry = cache.entries.get_mut(key)?;
-            entry.touched = Instant::now();
-            entry.source.clone()
-        };
+        let source = self.cache.lock().unwrap().source(key)?;
         match source {
             PreviewSource::File { path, root } => {
                 let resolved = path.canonicalize().ok()?;
@@ -188,7 +210,36 @@ impl Previews {
                 ImageAttachment::from_file(resolved).ok()
             }
             PreviewSource::Inline(image) => image.decode().ok(),
+            PreviewSource::Text { .. } => None,
         }
+    }
+
+    pub(super) fn file(&self, key: &str) -> Option<Result<FilePreview, &'static str>> {
+        let PreviewSource::Text { path, root } = self.documents.lock().unwrap().source(key)? else {
+            return None;
+        };
+        // A path registered for a reply must still refer to a file in the same workspace.
+        if !path.starts_with(&root) || path.canonicalize().ok().as_ref() != Some(&path) {
+            return None;
+        }
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        let file = read_file(&path).map(|file| {
+            let html = (file.markdown && file.text.len() <= MAX_MARKDOWN_BYTES).then(|| {
+                ReplyRenderer {
+                    store: self,
+                    workspace: Some(root),
+                    cwd: path.parent().unwrap_or(&path).to_owned(),
+                }
+                .render(file.text.trim_start_matches('\u{feff}'), &[])
+                .html
+            });
+            FilePreview {
+                name,
+                text: file.text,
+                html,
+            }
+        });
+        Some(file)
     }
 }
 
@@ -248,7 +299,7 @@ impl ReplyRenderer<'_> {
                 id,
                 link_type,
             }) => {
-                let href = self.link(&dest_url, &mut rendered.previews);
+                let href = self.link(&dest_url, &mut rendered.previews, true);
                 links.push(href.is_some());
                 href.map(|href| {
                     Event::Start(Tag::Link {
@@ -266,7 +317,7 @@ impl ReplyRenderer<'_> {
                 ..
             }) => {
                 let href = self
-                    .link(&dest_url, &mut rendered.previews)
+                    .link(&dest_url, &mut rendered.previews, false)
                     .filter(|_| !links.contains(&true));
                 links.push(href.is_some());
                 href.map(|href| {
@@ -295,7 +346,7 @@ impl ReplyRenderer<'_> {
         rendered
     }
 
-    fn link(&self, target: &str, previews: &mut Vec<Preview>) -> Option<String> {
+    fn link(&self, target: &str, previews: &mut Vec<Preview>, allow_text: bool) -> Option<String> {
         if target.len() > 4096 {
             return None;
         }
@@ -307,6 +358,28 @@ impl ReplyRenderer<'_> {
             {
                 return Some(url.into());
             }
+        }
+        self.image_link(target, previews).or_else(|| {
+            if !allow_text {
+                return None;
+            }
+            let path = local_file(target, &self.cwd)?.canonicalize().ok()?;
+            let root = self.workspace.as_deref()?;
+            if !path.starts_with(root) || supported_image(&path) || !path.is_file() {
+                return None;
+            }
+            Some(self.store.insert(
+                self.store.file_key(root, &path),
+                PreviewSource::Text {
+                    path,
+                    root: root.to_owned(),
+                },
+            ))
+        })
+    }
+
+    fn image_link(&self, target: &str, previews: &mut Vec<Preview>) -> Option<String> {
+        if let Ok(url) = Url::parse(target) {
             if url.scheme() == "file" {
                 if url.host_str().is_some() {
                     return None;

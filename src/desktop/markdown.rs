@@ -2,6 +2,7 @@ use super::{
     Language,
     style::{Icon, Palette, surface},
 };
+use crate::file_preview::local_file;
 use eframe::egui::{self, Align, Label, Layout, Margin, RichText, Stroke, Ui, vec2};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_extras::syntax_highlighting::{self, CodeTheme};
@@ -507,37 +508,6 @@ fn copy_code_button(ui: &mut Ui, content: &str) {
         ui.data_mut(|data| data.insert_temp(id, now));
         ui.ctx().request_repaint_after(Duration::from_millis(1600));
     }
-}
-
-fn local_file(target: &str, cwd: &Path) -> Option<PathBuf> {
-    if target.is_empty()
-        || target.len() > 4096
-        || target.starts_with(['#', '?'])
-        || target.starts_with("//")
-        || target.starts_with("\\\\")
-        || target.chars().any(char::is_control)
-    {
-        return None;
-    }
-    let target = target
-        .rsplit_once(':')
-        .filter(|(_, line)| !line.is_empty() && line.bytes().all(|byte| byte.is_ascii_digit()))
-        .map_or(target, |(path, _)| path);
-    let path = Path::new(target);
-    if path.is_absolute() && !target.starts_with('/') {
-        return Some(path.to_owned());
-    }
-    let url = if path.is_absolute() {
-        Url::parse(&format!("file://{target}")).ok()?
-    } else if let Ok(url) = Url::parse(target) {
-        url
-    } else {
-        Url::from_directory_path(cwd).ok()?.join(target).ok()?
-    };
-    if url.scheme() == "file" && url.host_str().is_none() {
-        return url.to_file_path().ok();
-    }
-    None
 }
 
 pub(super) fn reveal_file(path: &Path) {

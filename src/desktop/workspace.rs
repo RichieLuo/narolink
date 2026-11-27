@@ -49,6 +49,53 @@ impl Workspace {
         }
     }
 
+    pub fn git_status(&self, cwd: &std::path::Path) -> Result<crate::git::GitStatus, String> {
+        match self {
+            Self::Local(service) => service.git_status(cwd),
+            Self::Remote(remote) => remote.git_status(cwd),
+        }
+    }
+
+    pub fn git_diff(
+        &self,
+        cwd: &std::path::Path,
+        request: &crate::git::GitDiffRequest,
+    ) -> Result<crate::git::GitDiff, String> {
+        match self {
+            Self::Local(service) => service.git_diff(cwd, request),
+            Self::Remote(remote) => remote.git_diff(cwd, request),
+        }
+    }
+
+    pub fn git_action(
+        &self,
+        cwd: &std::path::Path,
+        action: &crate::git::GitAction,
+    ) -> Result<crate::git::GitActionResult, String> {
+        match self {
+            Self::Local(service) => service.git_action(cwd, action),
+            Self::Remote(remote) => remote.git_action(cwd, action),
+        }
+    }
+
+    pub fn git_generate_commit_message(
+        &self,
+        cwd: &std::path::Path,
+        amend: bool,
+        provider: Option<Provider>,
+        model: Option<&str>,
+        language: Option<&str>,
+    ) -> Result<String, String> {
+        match self {
+            Self::Local(service) => {
+                service.git_generate_commit_message(cwd, amend, provider, model, language)
+            }
+            Self::Remote(remote) => {
+                remote.git_generate_commit_message(cwd, amend, provider, model, language)
+            }
+        }
+    }
+
     pub fn permission_mode(
         &self,
         provider: Provider,

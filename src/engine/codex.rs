@@ -1190,6 +1190,24 @@ pub(super) fn generate_title(
     prompt: &str,
     cancel: &AtomicBool,
 ) -> Result<Value, String> {
+    generate_structured(
+        model,
+        title::INSTRUCTIONS,
+        title::schema(),
+        prompt,
+        title::TIMEOUT,
+        cancel,
+    )
+}
+
+pub(super) fn generate_structured(
+    model: Option<&str>,
+    instructions: &str,
+    schema: Value,
+    prompt: &str,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Value, String> {
     let cwd = current_workspace();
     let mut rpc = connect(&cwd, cancel, Some("read-only"), HANDSHAKE)?;
     let config = rpc.control("config/read", json!({"cwd":cwd}), cancel)?;
@@ -1202,7 +1220,7 @@ pub(super) fn generate_title(
         .collect::<serde_json::Map<_, _>>();
     let mut params = json!({
         "cwd":cwd, "ephemeral":true, "sandbox":"read-only", "approvalPolicy":"never",
-        "baseInstructions":title::INSTRUCTIONS, "environments":[], "dynamicTools":[],
+        "baseInstructions":instructions, "environments":[], "dynamicTools":[],
         "runtimeWorkspaceRoots":[], "selectedCapabilityRoots":[],
         "config":{
             "default_permissions":":read-only", "mcp_servers":servers, "web_search":"disabled",
@@ -1224,9 +1242,9 @@ pub(super) fn generate_title(
         .ok_or("Codex 未返回临时会话 ID")?;
     let request_id = rpc.submit(
         "turn/start",
-        json!({"threadId":id,"input":user_input(prompt, &[]),"outputSchema":title::schema()}),
+        json!({"threadId":id,"input":user_input(prompt, &[]),"outputSchema":schema}),
     )?;
-    let deadline = Instant::now() + title::TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let mut accepted = false;
     let mut complete = false;
     let mut text = None;
@@ -1243,20 +1261,21 @@ pub(super) fn generate_title(
             .filter(|_| params["threadId"] == id)
         {
             Some("turn/completed") if params["turn"]["status"] == "completed" => complete = true,
-            Some("turn/completed") => return Err("Codex 标题生成失败".into()),
+            Some("turn/completed") => return Err("Codex 生成失败".into()),
             Some("item/completed") if params["item"]["type"] == "agentMessage" => {
                 let item = &params["item"];
                 if item["phase"].is_null() || item["phase"] == "final_answer" {
                     text = item["text"]
                         .as_str()
-                        .filter(|text| text.len() <= 8 * 1024)
+                        .filter(|text| text.len() <= 16 * 1024)
                         .map(str::to_owned);
                 }
             }
             _ => rpc.reject(frame)?,
         }
     }
-    serde_json::from_str(&text.ok_or("Codex 未返回标题")?).map_err(|_| "Codex 标题格式无效".into())
+    serde_json::from_str(&text.ok_or("Codex 未返回生成结果")?)
+        .map_err(|_| "Codex 返回格式无效".into())
 }
 
 fn apply_config_resume_permissions(

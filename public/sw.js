@@ -1,4 +1,4 @@
-const cacheName = "narolink-shell-v77-context-menu";
+const cacheName = "narolink-shell-v79-preview-focus";
 const shell = ["/", "/theme.js", "/app.js", "/i18n.json", "/style.css", "/manifest.webmanifest", "/icons/180.png", "/icons/192.png", "/icons/512.png", "/qr-worker.js", "/vendor/jsqr.js"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(shell)).then(() => self.skipWaiting()));

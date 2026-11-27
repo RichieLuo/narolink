@@ -129,6 +129,94 @@ impl RemoteClient {
         read_json(send(self.get(&["usage"]))?)
     }
 
+    pub fn git_status(&self, cwd: &std::path::Path) -> Result<crate::git::GitStatus, String> {
+        read_json(send(
+            self.get(&["git", "status"])
+                .query(&[("cwd", cwd.to_string_lossy().as_ref())]),
+        )?)
+    }
+
+    pub fn git_diff(
+        &self,
+        cwd: &std::path::Path,
+        request: &crate::git::GitDiffRequest,
+    ) -> Result<crate::git::GitDiff, String> {
+        let scope = match request.scope {
+            crate::git::GitDiffScope::Staged => "staged",
+            crate::git::GitDiffScope::Unstaged => "unstaged",
+            crate::git::GitDiffScope::Untracked => "untracked",
+            crate::git::GitDiffScope::Commit => "commit",
+        };
+        let mut builder = self
+            .get(&["git", "diff"])
+            .query(&[("cwd", cwd.to_string_lossy().as_ref()), ("scope", scope)]);
+        if let Some(path) = request.path.as_deref() {
+            builder = builder.query(&[("path", path)]);
+        }
+        if let Some(commit) = request.commit.as_deref() {
+            builder = builder.query(&[("commit", commit)]);
+        }
+        read_json(send(builder)?)
+    }
+
+    pub fn git_action(
+        &self,
+        cwd: &std::path::Path,
+        action: &crate::git::GitAction,
+    ) -> Result<crate::git::GitActionResult, String> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            cwd: String,
+            #[serde(flatten)]
+            action: &'a crate::git::GitAction,
+        }
+        let body = Body {
+            cwd: cwd.to_string_lossy().into_owned(),
+            action,
+        };
+        let mut req = self
+            .request(Method::POST, &["git", "action"])
+            .header(header::ORIGIN, self.0.origin.as_str())
+            .json(&body);
+        if matches!(
+            action,
+            crate::git::GitAction::Fetch
+                | crate::git::GitAction::Pull
+                | crate::git::GitAction::Push
+        ) {
+            req = req.timeout(Duration::from_secs(65));
+        }
+        read_json(send(req)?)
+    }
+
+    pub fn git_generate_commit_message(
+        &self,
+        cwd: &std::path::Path,
+        amend: bool,
+        provider: Option<Provider>,
+        model: Option<&str>,
+        language: Option<&str>,
+    ) -> Result<String, String> {
+        #[derive(Deserialize)]
+        struct Reply {
+            message: String,
+        }
+        let body = json!({
+            "cwd": cwd.to_string_lossy(),
+            "amend": amend,
+            "provider": provider,
+            "model": model,
+            "language": language,
+        });
+        let req = self
+            .request(Method::POST, &["git", "commit-message"])
+            .header(header::ORIGIN, self.0.origin.as_str())
+            .timeout(Duration::from_secs(45))
+            .json(&body);
+        let reply: Reply = read_json(send(req)?)?;
+        Ok(reply.message)
+    }
+
     pub fn reset_codex_quota(&self, id: uuid::Uuid) -> Result<CodexQuotaResetOutcome, String> {
         let result: QuotaReset = read_json(self.post(
             &["quotas", "codex", "reset"],

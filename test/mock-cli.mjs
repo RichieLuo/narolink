@@ -162,6 +162,8 @@ function rpc(frame) {
       const data = [
         row({type:"agentMessage",id:"answer-1",phase:"final_answer",text:
           "Existing Codex response. [Open site](https://example.com/) [Preview](preview%20file.png) " +
+          `[README](<${path.join(cwd,"README.md").replaceAll("\\","/")}:12>) [README relative](README.md) ` +
+          "[Outside text](../outside.txt) " +
           "[Outside](../outside.png) [Invalid](javascript:invalid)"}),
         row({...searchAgent,id:"search-finish",kind:"completed"}),
         row({...legacyAgent,id:"legacy-finish",tool:"wait",agentsStates:{"agent-legacy":{status:"errored"}}}),
@@ -316,7 +318,8 @@ function rpc(frame) {
         return;
       }
       notify("item/agentMessage/delta",{threadId:params.threadId,itemId:"m1",delta:"Model " + selected});
-      notify("item/completed",{threadId:params.threadId,item:{id:"m1",type:"agentMessage",phase:"final_answer",text:"Model " + selected + " confirmed" + suffix}});
+      const answer = prompt === "open the readme" ? "[README](README.md)" : "Model " + selected + " confirmed" + suffix;
+      notify("item/completed",{threadId:params.threadId,item:{id:"m1",type:"agentMessage",phase:"final_answer",text:answer}});
       if (prompt === "wait for steering") {
         steeringThread = params.threadId;
         notify("item/completed",{threadId:params.threadId,item:{...searchAgent,id:"live-search",kind:"started"}});

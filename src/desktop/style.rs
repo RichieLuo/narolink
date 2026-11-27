@@ -335,6 +335,7 @@ pub(super) enum Icon {
     Code,
     Terminal,
     Blocked,
+    GitBranch,
 }
 
 impl Icon {
@@ -660,6 +661,13 @@ impl Icon {
             Self::Blocked => {
                 painter.circle_stroke(c, 5.4, stroke);
                 line((-3.8, 3.8), (3.8, -3.8));
+            }
+            Self::GitBranch => {
+                painter.circle_stroke(point(-3.5, -4.), 1.8, stroke);
+                painter.circle_stroke(point(-3.5, 4.), 1.8, stroke);
+                painter.circle_stroke(point(3.5, -2.5), 1.8, stroke);
+                line((-3.5, -2.2), (-3.5, 2.2));
+                path(&[(3.5, -0.7), (3.5, 1.2), (1.8, 2.5), (-1.8, 2.5)]);
             }
         }
     }

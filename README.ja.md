@@ -2,7 +2,17 @@
 
 [简体中文](README.md) · [English](README.en.md) · **日本語**
 
-Codex、Claude Code、Antigravity のセッションを、PC・スマートフォン・タブレットから再開できます。Naro は接続先の PC で CLI を実行します。別の PC にある Naro デスクトップアプリや、スマートフォン・タブレットのブラウザーから接続できます。接続先の PC が Go 製のリレーに接続するため、受信用ポートを外部に公開する必要はありません。会話履歴は各 CLI が管理し、リレーはリクエストとレスポンスをメモリ上で中継します。
+Codex、Claude Code、Antigravity のセッションを、PC・スマートフォン・タブレットから再開できます。Naro は接続先の PC で CLI を実行します。別の PC にある Naro デスクトップアプリや、スマートフォン・タブレットのブラウザーから接続できます。
+
+## リレーの仕組み
+
+**Naro の Go リレーはユーザーデータを永続化しません。** メッセージ、添付ファイル、ファイルのプレビュー、ペアリング記録はいずれもリレーのディスクに保存されず、メモリ上でのみ転送されます。会話履歴は接続先 PC 上の各 CLI が管理し、プロジェクトのファイルも接続先 PC の作業ディレクトリから読み込みます。
+
+![Naro の中継の流れ。接続先 PC が単一の WSS 接続を確立して待機中はハートビートのみを送信し、Go リレーがメモリ上で HTTPS リクエストと SSE 応答を多重転送します。](assets/readme/relay.ja.png)
+
+接続先 PC は受信用ポートを公開せず、Go リレーへ **1 本の WSS 接続**を能動的に確立し、待機中はハートビートのみを送受信します。リレーはその 1 本の接続上でリクエスト ID ごとに通常リクエスト・チャンク応答・逐次応答を並行転送するため、逐次応答中でも停止・承認・追加メッセージを即座に処理できます。ブラウザーや別 PC のクライアントは引き続き既存の HTTPS API と SSE を使用します。ペアリングコードは接続先 PC が検証し、認証情報は接続元の端末が保持します。リレーはデバイスルーティング・デバイス名・オンライン状態のみをメモリに保持し、転送完了・タイムアウト・切断時に待機中のリクエストを速やかに解放します。切断やリレー再起動後はランダムジッター付きバックオフで自動再接続し、送信済みリクエストを自動で再実行しません。新しいデスクトップ版は旧リレーが WSS 非対応と確認した場合のみ HTTPS ロングポーリングへフォールバックし、新しいリレーは旧デスクトップ版とも引き続き互換性を保ちます。
+
+公式サービスの HTTPS リバースプロキシ（Nginx）は、接続元 IP アドレスやリクエストパスを含むアクセスログを記録します。
 
 ## はじめに
 
@@ -16,7 +26,7 @@ Codex、Claude Code、Antigravity のセッションを、PC・スマートフ�
 - **使用量 → トークン使用量** で、過去24時間、7日間、30日間の合計とエンジン別の内訳を確認できます。入力にはキャッシュの読み取りと書き込みが含まれます。接続先の CLI 履歴を使用し、アーカイブ済みの Codex セッションと Antigravity の SQLite セッションにも対応します。**アカウントの利用上限** では残りの利用枠とリセット時刻を確認できます。
 - デスクトップとブラウザーのどちらからも応答中にメッセージを追加できます。**キューに追加**を選ぶと、現在のターンが終わってから順番に送信されます。**応答を誘導**では、新規のメッセージやキュー内のメッセージを、同じモデルで実行中のターンに送れます（Codex、Claude Code、Antigravity に対応）。送信方法は **設定 → セッション**で変更でき、クライアントごとに記憶されます。初期値はキューへの追加です。応答中に入力欄を空にすると **停止** が表示されます。停止すると、キューに残ったメッセージは未送信になります。
 - 入力欄の上にあるキューで **取り消して編集** を選ぶと、メッセージと画像が入力欄に戻ります。書きかけの内容には **下書きを切り替え** で戻れます。再送すると編集後のメッセージはキューの末尾に入ります。自分のメッセージとアシスタントの応答はコピーアイコンでコピーできます。
-- デスクトップ版では、アシスタントの応答内のローカルファイルリンクをクリックすると、右側に読み取り専用プレビューが開きます。コピー、再読み込み、**フォルダーに表示**に対応しています。Markdown は初期状態で整形表示され、**プレビュー / ソース**を切り替えられます。他の UTF-8 テキストはソースを表示します。上限は 1 ファイル 2 MiB で、256 KiB を超える Markdown はソースのみ表示します。小さいウィンドウでは、プレビュー中にセッション一覧を一時的に隠し、閉じると再表示します。
+- アシスタントの応答内のファイルリンクから、コピーと再読み込みができる読み取り専用プレビューを開けます。PC では右側、スマートフォンのブラウザーでは全画面で表示します。Web 版で表示できるのは、セッションの作業ディレクトリ内のファイルです。Markdown は初期状態で整形表示され、**プレビュー / ソース**を切り替えられます。他の UTF-8 テキストはソースを表示します。上限は 1 ファイル 2 MiB で、256 KiB を超える Markdown はソースのみ表示します。デスクトップ版では **フォルダーに表示**も利用でき、小さいウィンドウではプレビュー中にセッション一覧を一時的に隠します。
 - 入力欄では **Enter** で送信、**Shift+Enter** で改行します。**⌘V**（macOS）、**Ctrl+V**、または右クリックメニューで、テキストやスクリーンショット、画像を貼り付けられます。
 - PNG、JPEG、GIF、WebP を 1 回につき 4 枚まで、元画像の合計で 12 MiB まで添付できます。デスクトップとブラウザーの **画像**（**图片**）ボタンでファイルを選ぶこともできます。接続先 PC で画像を検証・変換し、CLI に渡します。最近の実行で使った画像はブラウザーでプレビューできます。
 
@@ -40,7 +50,49 @@ export NAROLINK_RELAY_TOKEN="$(openssl rand -hex 32)"
 | `NAROLINK_RELAY_ADDR` | リレーの待ち受けアドレス。既定値は `127.0.0.1:7319` |
 | `NAROLINK_TLS_CERT`、`NAROLINK_TLS_KEY` | 任意。Go リレーで直接 HTTPS を提供する場合は、証明書ファイルと秘密鍵ファイルの両方を指定 |
 
-HTTPS リバースプロキシを使う場合は、元の `Host` ヘッダーを保持し、リクエストボディーの上限を 36 MiB 以上、レスポンスのタイムアウトを 45 秒以上に設定します。以下は Caddy の設定例です。
+HTTPS リバースプロキシを使う場合は、元の `Host` ヘッダーを保持し、HTTP/1.1 と WebSocket アップグレード（`Upgrade` / `Connection`）を有効にし、リクエストボディーの上限を 36 MiB 以上に設定して WSS と SSE のバッファリングを無効にします。Nginx + 単一 Go リレーの構成例は以下の通りです。
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name naro.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/naro.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/naro.example.com/privkey.pem;
+
+    client_max_body_size 36m;
+
+    # 接続先 PC の WSS 長接続（待機時は 25 秒ごとにハートビート）
+    location ~ ^/relay/devices/[a-f0-9]{32}/ws$ {
+        proxy_pass http://127.0.0.1:7319;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+    }
+
+    # ブラウザー向け HTTPS API・SSE 逐次応答・旧版ロングポーリング互換
+    location / {
+        proxy_pass http://127.0.0.1:7319;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+    }
+}
+```
+
+Caddy を利用する場合は、以下のように設定できます。
 
 ```caddyfile
 naro.example.com {
@@ -114,6 +166,7 @@ Rust と Go のテストは、それぞれ `cargo test --locked` と `go test ./
 | `POST /api/runs/{id}/messages/{message_id}/withdraw` | 送信待ちのメッセージをキューから外し、`prompt` と Base64 エンコード済みの PNG `images` を返す。再アップロード時に `display_name` を指定すると元のファイル名を保持できる |
 | `GET /api/runs/{id}/images/{index}` | 最近のタスクから PNG に変換された画像を取得 |
 | `GET /api/previews/{key}` | メッセージが参照する画像のプレビューを取得 |
+| `GET /api/file-previews/{key}` | リンク先の作業ディレクトリ内のテキストを取得し、対応する場合は Markdown の整形結果も返す |
 | `POST /api/runs/{id}/stop` | タスクを停止 |
 | `POST /api/runs/{id}/approval` | `approval_id` と真偽値の `allow` を送信 |
 | `POST /api/runs/{id}/answer` | `question_id` と `answers` を送信。`answers` は個々の設問 ID をキー、選択肢や自由入力の文字列配列を値とするマップ |

@@ -857,14 +857,32 @@ pub(super) fn generate_title(
     prompt: &str,
     cancel: &AtomicBool,
 ) -> Result<Value, String> {
-    let schema = title::schema().to_string();
+    generate_structured(
+        model,
+        title::INSTRUCTIONS,
+        title::schema(),
+        prompt,
+        title::TIMEOUT,
+        cancel,
+    )
+}
+
+pub(super) fn generate_structured(
+    model: Option<&str>,
+    instructions: &str,
+    schema: Value,
+    prompt: &str,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Value, String> {
+    let schema = schema.to_string();
     let mut args = vec![
         "--safe-mode",
         "--no-session-persistence",
         "--tools",
         "",
         "--system-prompt",
-        title::INSTRUCTIONS,
+        instructions,
         "--json-schema",
         &schema,
     ];
@@ -877,12 +895,12 @@ pub(super) fn generate_title(
         json!({"type":"user","session_id":"","parent_tool_use_id":null,
         "message":{"role":"user","content":[{"type":"text","text":prompt}]}}),
     )?;
-    let deadline = Instant::now() + title::TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         let mut frame = receive(&process, cancel, Some(deadline))?;
         if frame["type"] == "result" {
             if frame["subtype"] != "success" || frame["is_error"] == true {
-                return Err("Claude Code 标题生成失败".into());
+                return Err("Claude Code 生成失败".into());
             }
             return Ok(frame["structured_output"].take());
         }

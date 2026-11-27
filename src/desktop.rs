@@ -2,6 +2,7 @@ use crate::engine::attachments::{
     ImageAttachment, LocalAttachment, MAX_IMAGE_ATTACHMENTS, validate_image_attachments,
 };
 mod files;
+mod git;
 mod i18n;
 mod input;
 #[cfg(target_os = "macos")]
@@ -115,6 +116,14 @@ enum Update {
     Snapshot(u64, String, Result<Option<Snapshot>, String>),
     Permission(u64, Result<Option<String>, String>),
     RunCommand(String, RunCommand, Result<Option<ComposerDraft>, String>),
+    GitStatus(u64, Result<crate::git::GitStatus, String>),
+    GitDiff(u64, Result<crate::git::GitDiff, String>),
+    GitAction(
+        u64,
+        crate::git::GitAction,
+        Result<crate::git::GitActionResult, String>,
+    ),
+    GitCommitMessage(u64, Result<String, String>),
 }
 
 struct Desktop {
@@ -185,6 +194,7 @@ struct Desktop {
     note: Option<String>,
     markdown: egui_commonmark::CommonMarkCache,
     files: files::FileViewer,
+    git: git::GitPanel,
     #[cfg(not(target_os = "macos"))]
     attachment_picker: Option<(egui::Id, egui_file_dialog::FileDialog)>,
     thumbnails: thumbnails::Thumbnails,
@@ -563,6 +573,7 @@ impl Desktop {
             note: None,
             markdown: Default::default(),
             files: Default::default(),
+            git: Default::default(),
             #[cfg(not(target_os = "macos"))]
             attachment_picker: None,
             thumbnails: Default::default(),
@@ -689,6 +700,7 @@ impl Desktop {
         self.pair_dialog = false;
         self.pairing_qr = None;
         self.files = files::FileViewer::default();
+        self.git.reset_for_workspace();
         self.thumbnails = thumbnails::Thumbnails::default();
         self.markdown = egui_commonmark::CommonMarkCache::default();
         #[cfg(not(target_os = "macos"))]
@@ -880,6 +892,125 @@ impl Desktop {
         self.epoch += 1;
         self.snapshot_error = None;
         self.reset_snapshot_poll();
+    }
+
+    fn current_git_cwd(&self) -> Option<PathBuf> {
+        let path = self
+            .view
+            .session
+            .as_ref()
+            .map(|session| &session.cwd)
+            .filter(|path| !path.as_os_str().is_empty())
+            .or_else(|| (!self.folder.as_os_str().is_empty()).then_some(&self.folder))?;
+        Some(path.clone())
+    }
+
+    fn sync_git_cwd(&mut self, ctx: &egui::Context) {
+        let cwd = self.current_git_cwd();
+        if self.git.set_cwd(cwd) && self.git.is_open() {
+            self.refresh_git(ctx);
+        }
+    }
+
+    fn toggle_git_panel(&mut self, ctx: &egui::Context) {
+        if self.git.is_open() {
+            self.git.close();
+            return;
+        }
+        self.files.close();
+        self.git.open = true;
+        let cwd = self.current_git_cwd();
+        self.git.set_cwd(cwd);
+        self.refresh_git(ctx);
+    }
+
+    fn refresh_git(&mut self, ctx: &egui::Context) {
+        let Some(cwd) = self.current_git_cwd() else {
+            self.git.loading = false;
+            return;
+        };
+        self.git.cwd = Some(cwd.clone());
+        self.git.serial += 1;
+        let serial = self.git.serial;
+        self.git.loading = true;
+        self.git.error = None;
+        self.background(ctx, move |workspace| {
+            Update::GitStatus(serial, workspace.git_status(&cwd))
+        });
+    }
+
+    fn load_git_diff(&mut self, ctx: &egui::Context, request: crate::git::GitDiffRequest) {
+        let Some(cwd) = self.git.cwd.clone().or_else(|| self.current_git_cwd()) else {
+            return;
+        };
+        self.git.diff_serial += 1;
+        let serial = self.git.diff_serial;
+        self.git.diff_loading = true;
+        self.git.diff_error = None;
+        self.background(ctx, move |workspace| {
+            Update::GitDiff(serial, workspace.git_diff(&cwd, &request))
+        });
+    }
+
+    fn run_git_action(&mut self, ctx: &egui::Context, action: crate::git::GitAction) {
+        if self.git.action_pending {
+            return;
+        }
+        let Some(cwd) = self.git.cwd.clone().or_else(|| self.current_git_cwd()) else {
+            return;
+        };
+        self.git.serial += 1;
+        let serial = self.git.serial;
+        self.git.action_pending = true;
+        self.git.error = None;
+        self.git.notice = None;
+        let action_for_update = action.clone();
+        self.background(ctx, move |workspace| {
+            let result = workspace.git_action(&cwd, &action);
+            Update::GitAction(serial, action_for_update, result)
+        });
+    }
+
+    fn generate_git_commit_message(&mut self, ctx: &egui::Context, amend: bool) {
+        if self.git.generating_message || self.git.action_pending {
+            return;
+        }
+        let Some(cwd) = self.git.cwd.clone().or_else(|| self.current_git_cwd()) else {
+            return;
+        };
+        self.git.generate_serial += 1;
+        let serial = self.git.generate_serial;
+        self.git.generating_message = true;
+        self.git.error = None;
+        self.git.notice = None;
+        let provider = Some(self.view.provider);
+        let model = self
+            .view
+            .selected_model(self.models.get(&self.view.provider))
+            .map(str::to_owned);
+        let language = Some(self.language.code().to_owned());
+        self.background(ctx, move |workspace| {
+            let result = workspace.git_generate_commit_message(
+                &cwd,
+                amend,
+                provider,
+                model.as_deref(),
+                language.as_deref(),
+            );
+            Update::GitCommitMessage(serial, result)
+        });
+    }
+
+    fn handle_git_command(&mut self, ctx: &egui::Context, command: git::GitCommand) {
+        match command {
+            git::GitCommand::Refresh => self.refresh_git(ctx),
+            git::GitCommand::LoadDiff(request) => self.load_git_diff(ctx, request),
+            git::GitCommand::RunAction(action) => self.run_git_action(ctx, action),
+            git::GitCommand::GenerateCommitMessage { amend } => {
+                self.generate_git_commit_message(ctx, amend);
+            }
+            git::GitCommand::Close => self.git.close(),
+        }
     }
 
     fn new_view(
@@ -1396,6 +1527,20 @@ impl Desktop {
                 Update::RunCommand(id, command, result) => {
                     self.finish_run_command(ctx, &id, command, result);
                 }
+                Update::GitStatus(serial, result) => {
+                    self.git.apply_status(serial, result);
+                }
+                Update::GitDiff(serial, result) => {
+                    self.git.apply_diff(serial, result);
+                }
+                Update::GitAction(serial, action, result) => {
+                    if let Some(request) = self.git.apply_action(serial, &action, result) {
+                        self.load_git_diff(ctx, request);
+                    }
+                }
+                Update::GitCommitMessage(serial, result) => {
+                    self.git.apply_generated_message(serial, result);
+                }
                 Update::Inventory(epoch, provider, result) if epoch == self.catalog_epoch => {
                     self.inventory_pending.remove(&provider);
                     if self.view.provider == provider
@@ -1614,6 +1759,9 @@ impl Desktop {
             }
             self.read_history(ctx, true);
             self.refresh_inventory(ctx, false);
+            if self.git.is_open() {
+                self.refresh_git(ctx);
+            }
         }
     }
 }

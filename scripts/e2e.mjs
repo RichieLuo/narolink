@@ -16,12 +16,19 @@ const root = await mkdtemp(path.join(os.tmpdir(),"narolink-e2e-"));
 const workspace = path.join(root,"test workspace");
 const sharedWorkspace = path.join(root,"shared workspace");
 const rollout = path.join(workspace,"mock-rollout.jsonl");
-await Promise.all([mkdir(workspace),mkdir(sharedWorkspace)]);
+const docs = path.join(workspace,"docs");
+const readmePath = path.join(workspace,"README.md");
+const readme = "# 查看 Naro\n\n[English](docs/README%20en.md)\n\n<script>unsafe code</script>\n";
+await Promise.all([mkdir(docs,{recursive:true}),mkdir(sharedWorkspace)]);
 const fixture = await readFile(path.join(project,"public","icons","180.png"));
 await Promise.all([
   writeFile(rollout,"original history\n"),
   writeFile(path.join(workspace,"preview file.png"),fixture),
   writeFile(path.join(root,"outside.png"),fixture),
+  writeFile(readmePath,readme),
+  writeFile(path.join(docs,"README en.md"),"# Naro in English\n\n[License](../LICENSE)\n"),
+  writeFile(path.join(workspace,"LICENSE"),"Example license\n"),
+  writeFile(path.join(root,"outside.txt"),"Outside the session directory\n"),
 ]);
 const keyDir = path.join(root,"auth");
 const proxy = "http://127.0.0.1:18080/";
@@ -168,6 +175,12 @@ async function ok(response) {
   return response;
 }
 const json = async response => (await ok(await response)).json();
+
+function fileLink(html, label) {
+  const match = html.match(new RegExp(`href="(/api/file-previews/[a-f0-9]{64})">${label}</a>`));
+  assert.ok(match, `Expected a file preview link for ${label}`);
+  return match[1];
+}
 
 async function replyEvents(target, route, signal) {
   const response = await ok(await target.get(route+"/events",{headers:{Accept:"text/event-stream"},signal}));
@@ -407,6 +420,25 @@ try {
       const asset = await ok(await phone.get(preview.url));
       assert.equal(asset.headers.get("content-type"),"image/png");
       assert.deepEqual(Buffer.from(await asset.arrayBuffer()).subarray(0,8),fixture.subarray(0,8));
+      const readmeLink = fileLink(reply.rendered.html,"README");
+      assert.equal(fileLink(reply.rendered.html,"README relative"), readmeLink);
+      assert.doesNotMatch(reply.rendered.html,/href="[^"]+"[^>]*>Outside text/);
+      assert.equal((await anonymous.get(readmeLink)).status,401);
+      assert.equal((await other.get(readmeLink)).status,404);
+      const readmeResponse = await ok(await phone.get(readmeLink));
+      assert.equal(readmeResponse.headers.get("cache-control"),"no-store");
+      const document = await readmeResponse.json();
+      assert.equal(document.name,"README.md");
+      assert.equal(document.text,readme);
+      assert.match(document.html,/<h1>查看 Naro<\/h1>/);
+      assert.doesNotMatch(document.html,/<script>/);
+      assert.deepEqual(await json(desktop.get(readmeLink)),document);
+      const english = await json(phone.get(fileLink(document.html,"English")));
+      assert.equal(english.name,"README en.md");
+      const license = await json(phone.get(fileLink(english.html,"License")));
+      assert.deepEqual(license,{name:"LICENSE",text:"Example license\n"});
+      await writeFile(readmePath,readme+"\nUpdated file\n");
+      assert.equal((await json(phone.get(readmeLink))).text,readme+"\nUpdated file\n");
       const watch = endpoint + "?since=" + encodeURIComponent(native.transcript.revision);
       assert.ok(native.transcript.revision);
       assert.equal((await json(phone.get(watch))).transcript,null);
@@ -549,6 +581,17 @@ try {
     assert.ok(recent.finished.some(run => run.id === task.id));
     console.log(provider + ": native history, model options and resume with image uploaded through Go relay verified");
   }
+
+  const fileRun = await json(phone.post("/api/runs",{
+    provider:"codex",session_id:id,cwd:workspace,model:"model-two",reasoning_effort:"high",
+    fast_mode:true,prompt:"open the readme",images,
+  }));
+  const fileRunRoute = "/api/runs/"+fileRun.id;
+  const liveFileEvents = await replyEvents(phone,fileRunRoute,AbortSignal.timeout(10000));
+  const fileTurn = await liveFileEvents("snapshot", snap => snap.status === "complete");
+  const fileFromReply = await json(phone.get(fileLink(fileTurn.replies[0].rendered.html,"README")));
+  assert.equal(fileFromReply.text,readme+"\nUpdated file\n");
+  console.log("file preview: history and live replies, local and paired access, Markdown links, and reload verified");
 
   for (const [provider, settings, answers] of [
     ["codex",{collaboration_mode:"plan",fast_mode:true},{color:["Orange"],notes:["Sample note"]}],

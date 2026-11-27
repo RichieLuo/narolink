@@ -595,14 +595,22 @@ impl Desktop {
             self.settings(ctx);
             return;
         }
-        // Keep both the chat and file readable on smaller windows. The session
-        // list returns when the preview closes or the window is widened.
-        let show_sidebar = !self.files.is_open() || ctx.content_rect().width() >= 1080.;
+        // Keep both the chat and right panel readable on smaller windows. The session
+        // list returns when the panel closes or the window is widened.
+        self.sync_git_cwd(ctx);
+        if self.files.is_open() && self.git.is_open() {
+            self.git.close();
+        }
+        let show_sidebar =
+            !(self.files.is_open() || self.git.is_open()) || ctx.content_rect().width() >= 1080.;
         if show_sidebar {
             self.sidebar(ctx);
         }
         self.conversation_header(ctx, show_sidebar);
         self.files.show(ctx);
+        if let Some(command) = self.git.show(ctx) {
+            self.handle_git_command(ctx, command);
+        }
 
         let chat_bounds = ctx.available_rect();
         let editor_max_height = (chat_bounds.height() * 0.3).min(COMPOSER_MAX_EDITOR_HEIGHT);
@@ -697,6 +705,44 @@ impl Desktop {
                 );
                 if devices.response.on_hover_text(device_label).clicked() {
                     self.pair_dialog = true;
+                }
+                if self.current_git_cwd().is_some() {
+                    let git_label = match self.git.status.as_ref().filter(|st| st.is_repo) {
+                        Some(st) => {
+                            let name = st
+                                .branch
+                                .as_deref()
+                                .or(st.head_short.as_deref())
+                                .unwrap_or("Git");
+                            let changes = st.total_changes();
+                            if changes > 0 {
+                                format!("{} · {changes}", engine::cut(name, 16))
+                            } else {
+                                engine::cut(name, 18).to_owned()
+                            }
+                        }
+                        None => "Git".to_owned(),
+                    };
+                    let git_btn = Icon::GitBranch
+                        .label(RichText::new(&git_label).size(12.))
+                        .selected(self.git.is_open())
+                        .atom_ui(ui);
+                    Icon::GitBranch.paint_in(
+                        ui,
+                        &git_btn,
+                        if self.git.is_open() {
+                            palette.accent
+                        } else {
+                            palette.muted
+                        },
+                    );
+                    if git_btn
+                        .response
+                        .on_hover_text(language.text("Git 管理"))
+                        .clicked()
+                    {
+                        self.toggle_git_panel(ctx);
+                    }
                 }
                 if self.view.session.is_some() {
                     let trigger = Icon::More.button(ui, language.text("会话操作"), palette.muted);
@@ -3154,38 +3200,36 @@ impl Desktop {
             };
             let mut close = false;
             let mut refresh = false;
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(language.text("用量")).size(22.).strong());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    close = Icon::Close
-                        .button(ui, language.text("关闭"), palette.muted)
-                        .clicked();
-                    ui.add_enabled_ui(can_refresh, |ui| {
-                        refresh = Icon::refresh_button(
-                            ui,
-                            language.text(refresh_label),
-                            palette.muted,
-                            spinning && ui.is_visible(),
-                        )
-                        .clicked();
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), 34.),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    let (icon, _) = ui.allocate_exact_size(vec2(32., 32.), egui::Sense::hover());
+                    ui.painter().rect_filled(icon, 9., palette.tint);
+                    Icon::Usage.paint(ui.painter(), icon.center(), palette.accent);
+                    ui.add_space(3.);
+                    ui.label(RichText::new(language.text("用量")).size(20.).strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        close = Icon::Close
+                            .button(ui, language.text("关闭"), palette.muted)
+                            .clicked();
+                        ui.add_enabled_ui(can_refresh, |ui| {
+                            refresh = Icon::refresh_button(
+                                ui,
+                                language.text(refresh_label),
+                                palette.muted,
+                                spinning && ui.is_visible(),
+                            )
+                            .clicked();
+                        });
                     });
-                });
-            });
-            ui.add_space(5.);
-            ui.horizontal_wrapped(|ui| {
-                for (account, label) in [(false, "Token 用量"), (true, "账号额度")] {
-                    let selected = self.showing_account_quota == account;
-                    if ui
-                        .add(Button::new(language.text(label)).selected(selected))
-                        .clicked()
-                        && !selected
-                    {
-                        self.showing_account_quota = account;
-                        refresh = true;
-                    }
-                }
-            });
-            ui.add_space(8.);
+                },
+            );
+            ui.add_space(6.);
+            if usage_section_tabs(ui, &mut self.showing_account_quota) {
+                refresh = true;
+            }
+            ui.add_space(10.);
             if self.showing_account_quota {
                 if refresh {
                     self.load_quota(ctx, provider);
@@ -3212,31 +3256,17 @@ impl Desktop {
     fn token_usage_content(&mut self, ui: &mut Ui) {
         let palette = Palette::of(ui);
         let language = Language::in_ui(ui);
-        ui.horizontal_wrapped(|ui| {
-            for period in UsagePeriod::ALL {
-                if ui
-                    .add(
-                        Button::new(language.text(period.label()))
-                            .selected(self.token_period == period),
-                    )
-                    .clicked()
-                {
-                    self.token_period = period;
-                }
-            }
-        });
-        ui.add_space(4.);
-        ui.label(
-            RichText::new(language.text("统计所连接电脑上的 CLI 历史。输入含缓存读取和写入。"))
-                .color(palette.muted)
-                .size(12.),
-        );
-        ui.add_space(4.);
+        let periods = UsagePeriod::ALL.map(|period| (period, language.text(period.label())));
+        if let Some(period) = segmented_bar(ui, self.token_period, &periods) {
+            self.token_period = period;
+        }
+        ui.add_space(10.);
         if let Some(error) = &self.token_usage_error {
             ui.label(RichText::new(language.text(error)).color(palette.warn));
             if self.token_usage.is_none() {
                 return;
             }
+            ui.add_space(6.);
         }
         let Some(window) = self.token_usage.as_ref().and_then(|report| {
             report
@@ -3244,45 +3274,30 @@ impl Desktop {
                 .iter()
                 .find(|window| window.period == self.token_period)
         }) else {
-            ui.label(RichText::new(language.text("正在读取 Token 用量…")).color(palette.muted));
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(14.).color(palette.accent));
+                ui.label(
+                    RichText::new(language.text("正在读取 Token 用量…")).color(palette.muted),
+                );
+            });
             return;
         };
-        render_token_counts(
-            ui,
-            language.text("总消耗"),
-            window.total,
-            window.providers.iter().any(|provider| provider.partial),
-            true,
+        render_token_usage_window(ui, window);
+        ui.add_space(8.);
+        ui.label(
+            RichText::new(language.text("统计所连接电脑上的 CLI 历史。输入含缓存读取和写入。"))
+                .color(palette.muted)
+                .size(11.5),
         );
-        for provider in &window.providers {
-            ui.add_space(4.);
-            render_token_counts(
-                ui,
-                provider.provider.label(),
-                provider.counts,
-                provider.partial,
-                false,
-            );
-        }
     }
 
     fn quota_content(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let palette = Palette::of(ui);
         let language = Language::in_ui(ui);
         let provider = self.quota_provider;
-        let mut next_provider = None;
-        ui.horizontal_wrapped(|ui| {
-            for choice_provider in Provider::ALL {
-                let selected = provider == choice_provider;
-                let choice = Button::new(RichText::new(choice_provider.label()).color(palette.ink))
-                    .selected(selected)
-                    .min_size(vec2(106., 30.));
-                if ui.add(choice).clicked() && !selected {
-                    next_provider = Some(choice_provider);
-                }
-            }
-        });
-        ui.add_space(5.);
+        let providers = Provider::ALL.map(|choice| (choice, choice.label()));
+        let next_provider = segmented_bar(ui, provider, &providers);
+        ui.add_space(10.);
         let mut reset_credits = None;
         if self.quota_pending.contains(&provider) {
             ui.horizontal(|ui| {
@@ -3903,6 +3918,147 @@ fn show_quota_modal(
         })
 }
 
+fn usage_section_tabs(ui: &mut Ui, showing_account_quota: &mut bool) -> bool {
+    let palette = Palette::of(ui);
+    let language = Language::in_ui(ui);
+    let mut changed = false;
+    let width = ui.available_width();
+    let tab_height = 32.;
+    let full_left = ui.cursor().left();
+    let baseline_y = ui.cursor().top() + tab_height - 0.5;
+    ui.painter().line_segment(
+        [
+            egui::pos2(full_left, baseline_y),
+            egui::pos2(full_left + width, baseline_y),
+        ],
+        Stroke::new(1., palette.line),
+    );
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 20.;
+        for (account, label) in [(false, "Token 用量"), (true, "账号额度")] {
+            let selected = *showing_account_quota == account;
+            let text = language.text(label);
+            let font = FontId::proportional(14.);
+            let galley = ui.fonts_mut(|fonts| {
+                fonts.layout_no_wrap(text.to_owned(), font.clone(), palette.ink)
+            });
+            let size = vec2(galley.size().x + 4., tab_height);
+            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+            response.widget_info(|| {
+                WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, text)
+            });
+            let color = if selected || response.hovered() {
+                palette.ink
+            } else {
+                palette.muted
+            };
+            let galley = ui.fonts_mut(|fonts| fonts.layout_no_wrap(text.to_owned(), font, color));
+            let text_pos = egui::pos2(
+                rect.center().x - galley.size().x / 2.,
+                rect.top() + (rect.height() - galley.size().y - 4.) / 2.,
+            );
+            ui.painter().galley(text_pos, galley, color);
+            if selected {
+                let bar = Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.bottom() - 2.5),
+                    egui::pos2(rect.right(), rect.bottom()),
+                );
+                ui.painter().rect_filled(bar, 1.25, palette.accent);
+            }
+            if response.clicked() && !selected {
+                *showing_account_quota = account;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+fn segmented_bar<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    current: T,
+    items: &[(T, &str)],
+) -> Option<T> {
+    let palette = Palette::of(ui);
+    let mut selected_next = None;
+    egui::Frame::new()
+        .fill(palette.soft)
+        .corner_radius(10)
+        .inner_margin(Margin::same(3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.;
+                for &(value, label) in items {
+                    let active = current == value;
+                    let font = FontId::proportional(12.5);
+                    let color = if active { palette.ink } else { palette.muted };
+                    let galley = ui.fonts_mut(|fonts| {
+                        fonts.layout_no_wrap(label.to_owned(), font.clone(), color)
+                    });
+                    let size = vec2((galley.size().x + 22.).max(76.), 26.);
+                    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                    response.widget_info(|| {
+                        WidgetInfo::selected(WidgetType::SelectableLabel, true, active, label)
+                    });
+                    let painter = ui.painter();
+                    if active {
+                        painter.rect(
+                            rect,
+                            7.,
+                            palette.paper,
+                            Stroke::new(1., palette.line),
+                            StrokeKind::Inside,
+                        );
+                    } else if response.hovered() {
+                        painter.rect_filled(rect, 7., palette.paper.gamma_multiply(0.55));
+                    }
+                    let text_color = if active || response.hovered() {
+                        palette.ink
+                    } else {
+                        palette.muted
+                    };
+                    let galley = ui.fonts_mut(|fonts| {
+                        fonts.layout_no_wrap(label.to_owned(), font, text_color)
+                    });
+                    let pos = rect.center() - galley.size() / 2.;
+                    painter.galley(pos, galley, text_color);
+                    if response.clicked() && !active {
+                        selected_next = Some(value);
+                    }
+                }
+            });
+        });
+    selected_next
+}
+
+fn provider_accent(ui: &Ui, palette: Palette, provider: Provider) -> Color32 {
+    match provider {
+        Provider::Codex => palette.accent,
+        Provider::Claude => {
+            if ui.visuals().dark_mode {
+                Color32::from_rgb(228, 155, 114)
+            } else {
+                Color32::from_rgb(199, 111, 69)
+            }
+        }
+        Provider::Antigravity => palette.online,
+    }
+}
+
+fn format_share(part: u64, total: u64) -> Option<String> {
+    if total == 0 || part == 0 {
+        return None;
+    }
+    let tenths = ((u128::from(part) * 1000) + u128::from(total) / 2) / u128::from(total);
+    if tenths == 0 {
+        Some("<0.1%".into())
+    } else if tenths % 10 == 0 {
+        Some(format!("{}%", tenths / 10))
+    } else {
+        Some(format!("{}.{}%", tenths / 10, tenths % 10))
+    }
+}
+
 fn render_quota(ui: &mut Ui, quota: &Quota) {
     let palette = Palette::of(ui);
     let language = Language::in_ui(ui);
@@ -3911,16 +4067,26 @@ fn render_quota(ui: &mut Ui, quota: &Quota) {
     }
     let now = crate::engine::unix_time(std::time::SystemTime::now());
     for (group_index, limit) in quota.limits.iter().enumerate() {
-        surface(palette, palette.paper, Margin::symmetric(14, 10)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 4.;
-            ui.label(RichText::new(language.text(&limit.name)).strong());
-            for (row_index, window) in limit.windows.iter().enumerate() {
-                ui.push_id((group_index, row_index), |ui| {
-                    render_quota_window(ui, window, now)
-                });
-            }
-        });
+        if group_index > 0 {
+            ui.add_space(4.);
+        }
+        surface(palette, palette.paper, Margin::symmetric(16, 12))
+            .corner_radius(14)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 6.;
+                ui.label(
+                    RichText::new(language.text(&limit.name))
+                        .size(13.)
+                        .color(palette.muted)
+                        .strong(),
+                );
+                for (row_index, window) in limit.windows.iter().enumerate() {
+                    ui.push_id((group_index, row_index), |ui| {
+                        render_quota_window(ui, window, now)
+                    });
+                }
+            });
     }
     let balance = if quota.unlimited_credits {
         Some(language.text("不限"))
@@ -3928,66 +4094,319 @@ fn render_quota(ui: &mut Ui, quota: &Quota) {
         quota.credit_balance.as_deref()
     };
     if let Some(balance) = balance {
-        ui.label(language.format("积分余额 {balance}", &[("balance", balance)]));
+        ui.add_space(4.);
+        surface(palette, palette.canvas, Margin::symmetric(16, 10))
+            .corner_radius(12)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(
+                    RichText::new(language.format("积分余额 {balance}", &[("balance", balance)]))
+                        .size(13.)
+                        .color(palette.muted),
+                );
+            });
     }
 }
 
-fn render_token_counts(
+fn render_token_usage_window(ui: &mut Ui, window: &engine::usage::UsageWindow) {
+    let palette = Palette::of(ui);
+    let language = Language::in_ui(ui);
+    let grand_total = window.total.map_or(0, TokenCounts::total);
+    let any_partial = window.providers.iter().any(|provider| provider.partial);
+
+    // Tier 1: Hero summary card
+    egui::Frame::new()
+        .fill(palette.notice)
+        .stroke(Stroke::new(1., palette.tint_line))
+        .corner_radius(14)
+        .inner_margin(Margin::symmetric(16, 13))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::Sides::new().shrink_left().show(
+                ui,
+                |ui| {
+                    ui.label(
+                        RichText::new(language.text("总消耗"))
+                            .size(12.5)
+                            .color(palette.muted)
+                            .strong(),
+                    );
+                },
+                |ui| {
+                    if any_partial {
+                        ui.label(
+                            RichText::new(language.text("部分 Token 记录暂不可用。"))
+                                .size(11.5)
+                                .color(palette.muted),
+                        );
+                    }
+                },
+            );
+            if let Some(total) = window.total {
+                let count = total.total();
+                let hover = format!("{} Tokens", group_tokens(count));
+                let mut job = egui::text::LayoutJob::default();
+                job.append(
+                    &format_token_count(count),
+                    0.,
+                    egui::TextFormat {
+                        font_id: FontId::proportional(28.),
+                        color: palette.ink,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    " Tokens",
+                    4.,
+                    egui::TextFormat {
+                        font_id: FontId::proportional(13.),
+                        color: palette.muted,
+                        valign: Align::BOTTOM,
+                        ..Default::default()
+                    },
+                );
+                ui.label(job).on_hover_text(&hover);
+                if grand_total > 0 {
+                    ui.add_space(4.);
+                    render_stacked_share_bar(ui, &window.providers, grand_total);
+                }
+                ui.add_space(8.);
+                let (divider, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 1.), egui::Sense::hover());
+                ui.painter().rect_filled(divider, 0., palette.tint_line);
+                ui.add_space(8.);
+                render_token_metric_columns(ui, total, true);
+            } else {
+                ui.add_space(2.);
+                ui.label(
+                    RichText::new(language.text("暂无 Token 记录。"))
+                        .size(13.)
+                        .color(palette.muted),
+                );
+            }
+        });
+
+    ui.add_space(12.);
+    ui.label(
+        RichText::new(language.text("各引擎明细"))
+            .size(12.)
+            .color(palette.muted)
+            .strong(),
+    );
+    ui.add_space(4.);
+
+    // Tier 2: Unified provider breakdown card
+    surface(palette, palette.paper, Margin::symmetric(16, 4))
+        .corner_radius(14)
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            for (index, provider) in window.providers.iter().enumerate() {
+                if index > 0 {
+                    let (divider, _) = ui
+                        .allocate_exact_size(vec2(ui.available_width(), 1.), egui::Sense::hover());
+                    ui.painter().rect_filled(divider, 0., palette.line);
+                }
+                egui::Frame::new()
+                    .inner_margin(Margin::symmetric(0, 9))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        render_provider_usage_row(ui, provider, grand_total);
+                    });
+            }
+        });
+}
+
+fn render_stacked_share_bar(
     ui: &mut Ui,
-    label: &str,
-    counts: Option<TokenCounts>,
-    partial: bool,
-    summary: bool,
+    providers: &[engine::usage::ProviderUsage],
+    grand_total: u64,
+) {
+    let palette = Palette::of(ui);
+    let segments: Vec<_> = providers
+        .iter()
+        .filter_map(|item| {
+            let count = item.counts?.total();
+            (count > 0).then_some((item.provider, count))
+        })
+        .collect();
+    if segments.is_empty() || grand_total == 0 {
+        return;
+    }
+    let width = ui.available_width();
+    let height = 6.;
+    let (track, _) = ui.allocate_exact_size(vec2(width, height), egui::Sense::hover());
+    ui.painter().rect_filled(track, height / 2., palette.soft);
+    let gap = 2.;
+    let total_gap = gap * (segments.len().saturating_sub(1) as f32);
+    let usable = (width - total_gap).max(1.);
+    let min_seg = 4.;
+    let raw: Vec<f32> = segments
+        .iter()
+        .map(|(_, count)| (usable * (*count as f32 / grand_total as f32)).max(min_seg))
+        .collect();
+    let raw_sum: f32 = raw.iter().sum();
+    let scale = if raw_sum > usable {
+        usable / raw_sum
+    } else {
+        1.
+    };
+    let mut x = track.left();
+    for (index, ((provider, count), seg_width)) in segments.iter().zip(raw).enumerate() {
+        let w = (seg_width * scale).max(2.);
+        let right = if index + 1 == segments.len() {
+            track.right()
+        } else {
+            (x + w).min(track.right())
+        };
+        let seg_rect = Rect::from_min_max(egui::pos2(x, track.top()), egui::pos2(right, track.bottom()));
+        let color = provider_accent(ui, palette, *provider);
+        ui.painter().rect_filled(seg_rect, height / 2., color);
+        let share = format_share(*count, grand_total).unwrap_or_default();
+        ui.interact(seg_rect, ui.id().with(("share_seg", index)), egui::Sense::hover())
+            .on_hover_text(format!(
+                "{} · {} Tokens ({share})",
+                provider.label(),
+                group_tokens(*count)
+            ));
+        x = right + gap;
+    }
+}
+
+fn render_token_metric_columns(ui: &mut Ui, counts: TokenCounts, hero: bool) {
+    let palette = Palette::of(ui);
+    let language = Language::in_ui(ui);
+    let fields = [
+        ("输入 Token", counts.input_tokens),
+        ("输出 Token", counts.output_tokens),
+        ("缓存读取", counts.cache_read_tokens),
+        ("缓存写入", counts.cache_write_tokens),
+    ];
+    let label_size = if hero { 11. } else { 10.5 };
+    let value_size = if hero { 14. } else { 12.5 };
+    ui.columns(fields.len(), |columns| {
+        for (column, (label, value)) in columns.iter_mut().zip(fields) {
+            column.spacing_mut().item_spacing.y = 1.5;
+            column.label(
+                RichText::new(language.text(label))
+                    .size(label_size)
+                    .color(palette.muted),
+            );
+            let value_color = if value == 0 {
+                palette.muted
+            } else {
+                palette.ink
+            };
+            let mut text = RichText::new(format_token_count(value))
+                .size(value_size)
+                .color(value_color);
+            if hero && value > 0 {
+                text = text.strong();
+            }
+            column
+                .label(text)
+                .on_hover_text(format!("{} Tokens", group_tokens(value)));
+        }
+    });
+}
+
+fn render_provider_usage_row(
+    ui: &mut Ui,
+    provider: &engine::usage::ProviderUsage,
+    grand_total: u64,
 ) {
     let palette = Palette::of(ui);
     let language = Language::in_ui(ui);
-    surface(palette, palette.paper, Margin::symmetric(12, 7)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(label).strong());
-            if let Some(counts) = counts {
-                let count = counts.total();
-                ui.label(
-                    RichText::new(format!("{} Tokens", format_token_count(count)))
-                        .size(if summary { 20. } else { 15. })
-                        .strong(),
-                )
-                .on_hover_text(format!("{} Tokens", group_tokens(count)));
-            }
-        });
-        if let Some(counts) = counts {
-            let fields = [
-                ("输入 Token", counts.input_tokens),
-                ("输出 Token", counts.output_tokens),
-                ("缓存读取", counts.cache_read_tokens),
-                ("缓存写入", counts.cache_write_tokens),
-            ];
-            ui.columns(fields.len(), |columns| {
-                for (column, (label, value)) in columns.iter_mut().zip(fields) {
-                    column.label(
-                        RichText::new(language.text(label))
-                            .size(11.)
+    let accent = provider_accent(ui, palette, provider.provider);
+    let count = provider.counts.map(TokenCounts::total);
+    let share = count.and_then(|value| format_share(value, grand_total));
+
+    egui::Sides::new()
+        .height(22.)
+        .shrink_left()
+        .show(
+            ui,
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 7.;
+                let (dot, _) = ui.allocate_exact_size(vec2(8., 8.), egui::Sense::hover());
+                let dot_color = if count.is_some_and(|value| value > 0) {
+                    accent
+                } else {
+                    palette.line
+                };
+                ui.painter().circle_filled(dot.center(), 4., dot_color);
+                ui.label(RichText::new(provider.provider.label()).size(13.5).strong());
+            },
+            |ui| {
+                if let Some(value) = count {
+                    let hover = format!("{} Tokens", group_tokens(value));
+                    ui.spacing_mut().item_spacing.x = 5.;
+                    ui.label(RichText::new("Tokens").size(11.5).color(palette.muted))
+                        .on_hover_text(&hover);
+                    let value_color = if value == 0 {
+                        palette.muted
+                    } else {
+                        palette.ink
+                    };
+                    ui.label(
+                        RichText::new(format_token_count(value))
+                            .size(14.)
+                            .color(value_color)
+                            .strong(),
+                    )
+                    .on_hover_text(&hover);
+                    if let Some(share) = &share {
+                        ui.add_space(2.);
+                        let galley = ui.fonts_mut(|fonts| {
+                            fonts.layout_no_wrap(
+                                share.clone(),
+                                FontId::proportional(11.),
+                                palette.muted,
+                            )
+                        });
+                        let (chip, _) = ui.allocate_exact_size(
+                            galley.size() + vec2(10., 4.),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter()
+                            .rect_filled(chip, chip.height() / 2., palette.soft);
+                        ui.painter()
+                            .galley(chip.center() - galley.size() / 2., galley, palette.muted);
+                    }
+                } else {
+                    ui.label(
+                        RichText::new(language.text("暂无 Token 记录。"))
+                            .size(12.)
                             .color(palette.muted),
                     );
-                    column
-                        .label(RichText::new(format_token_count(value)).strong())
-                        .on_hover_text(format!("{} Tokens", group_tokens(value)));
                 }
-            });
+            },
+        );
+
+    if let Some(counts) = provider.counts {
+        let value = counts.total();
+        if grand_total > 0 {
+            ui.add_space(3.);
+            let width = ui.available_width();
+            let height = 3.;
+            let (track, _) = ui.allocate_exact_size(vec2(width, height), egui::Sense::hover());
+            ui.painter().rect_filled(track, height / 2., palette.soft);
+            if value > 0 {
+                let fill_w = (width * (value as f32 / grand_total as f32)).clamp(3., width);
+                let fill = Rect::from_min_size(track.min, vec2(fill_w, height));
+                ui.painter().rect_filled(fill, height / 2., accent);
+            }
         }
-        if partial || counts.is_none() {
-            let note = if partial {
-                "部分 Token 记录暂不可用。"
-            } else {
-                "暂无 Token 记录。"
-            };
-            ui.label(
-                RichText::new(language.text(note))
-                    .size(12.)
-                    .color(palette.muted),
-            );
-        }
-    });
+        ui.add_space(5.);
+        render_token_metric_columns(ui, counts, false);
+    }
+    if provider.partial {
+        ui.add_space(4.);
+        ui.label(
+            RichText::new(language.text("部分 Token 记录暂不可用。"))
+                .size(11.)
+                .color(palette.muted),
+        );
+    }
 }
 
 fn format_token_count(count: u64) -> String {
@@ -5248,6 +5667,152 @@ mod quota_tests {
             assert!(!closed.get());
             render(click(egui::pos2(4., 4.)));
             assert!(closed.get());
+        }
+    }
+
+    #[test]
+    fn token_usage_modal_hierarchy_renders_and_switches_controls() {
+        assert_eq!(format_share(0, 100), None);
+        assert_eq!(format_share(10, 0), None);
+        assert_eq!(format_share(1, 10_000), Some("<0.1%".into()));
+        assert_eq!(format_share(50, 100), Some("50%".into()));
+        assert_eq!(format_share(224_880_000, 398_040_000), Some("56.5%".into()));
+
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(760., 700.));
+        let window = engine::usage::UsageWindow {
+            period: UsagePeriod::Day,
+            total: Some(TokenCounts {
+                input_tokens: 396_470_000,
+                output_tokens: 1_570_000,
+                cache_read_tokens: 388_600_000,
+                cache_write_tokens: 0,
+            }),
+            providers: [
+                engine::usage::ProviderUsage {
+                    provider: Provider::Codex,
+                    counts: Some(TokenCounts {
+                        input_tokens: 223_840_000,
+                        output_tokens: 1_040_000,
+                        cache_read_tokens: 218_970_000,
+                        cache_write_tokens: 0,
+                    }),
+                    partial: false,
+                },
+                engine::usage::ProviderUsage {
+                    provider: Provider::Claude,
+                    counts: Some(TokenCounts {
+                        input_tokens: 167_310_000,
+                        output_tokens: 440_034,
+                        cache_read_tokens: 164_810_000,
+                        cache_write_tokens: 0,
+                    }),
+                    partial: false,
+                },
+                engine::usage::ProviderUsage {
+                    provider: Provider::Antigravity,
+                    counts: Some(TokenCounts {
+                        input_tokens: 5_320_000,
+                        output_tokens: 92_125,
+                        cache_read_tokens: 4_820_000,
+                        cache_write_tokens: 0,
+                    }),
+                    partial: true,
+                },
+            ],
+        };
+
+        for language in Language::ALL {
+            let ctx = egui::Context::default();
+            setup(&ctx);
+            language.apply(&ctx);
+            let showing_account = std::cell::Cell::new(false);
+            let period = std::cell::Cell::new(UsagePeriod::Day);
+            let render = |events| {
+                ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(screen),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        show_quota_modal(ctx, |ui| {
+                            let mut account = showing_account.get();
+                            usage_section_tabs(ui, &mut account);
+                            showing_account.set(account);
+                            ui.add_space(10.);
+                            let periods = UsagePeriod::ALL
+                                .map(|item| (item, language.text(item.label())));
+                            if let Some(next) = segmented_bar(ui, period.get(), &periods) {
+                                period.set(next);
+                            }
+                            ui.add_space(10.);
+                            render_token_usage_window(ui, &window);
+                            false
+                        });
+                    },
+                )
+            };
+            render(vec![]);
+            let output = render(vec![]);
+            let labels: Vec<_> = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) => {
+                        Some((text.galley.text().to_owned(), text.visual_bounding_rect()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for expected in [
+                language.text("Token 用量"),
+                language.text("账号额度"),
+                language.text("总消耗"),
+                language.text("各引擎明细"),
+                "Codex",
+                "Claude Code",
+                "Antigravity",
+                "56.5%",
+                "42.1%",
+                "1.4%",
+            ] {
+                assert!(
+                    labels
+                        .iter()
+                        .any(|(text, rect)| text == expected && screen.contains_rect(*rect)),
+                    "Missing or clipped usage label: {expected}"
+                );
+            }
+            let click = |position| {
+                let button = |pressed| egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                vec![
+                    egui::Event::PointerMoved(position),
+                    button(true),
+                    button(false),
+                ]
+            };
+            let week_label = language.text(UsagePeriod::Week.label());
+            let week_rect = labels
+                .iter()
+                .find(|(text, _)| text == week_label)
+                .unwrap()
+                .1;
+            render(click(week_rect.center()));
+            assert_eq!(period.get(), UsagePeriod::Week);
+
+            let account_label = language.text("账号额度");
+            let account_rect = labels
+                .iter()
+                .find(|(text, _)| text == account_label)
+                .unwrap()
+                .1;
+            render(click(account_rect.center()));
+            assert!(showing_account.get());
         }
     }
 }

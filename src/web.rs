@@ -266,6 +266,7 @@ fn routes(web: Web) -> Router {
         )
         .route("/api/sessions/{provider}/{id}", get(transcript))
         .route("/api/previews/{key}", get(preview))
+        .route("/api/file-previews/{key}", get(file_preview))
         .route("/api/models/{provider}", get(models))
         .route(
             "/api/permissions/{provider}",
@@ -274,6 +275,10 @@ fn routes(web: Web) -> Router {
         .route("/api/quotas/{provider}", get(quota))
         .route("/api/quotas/codex/reset", post(reset_codex_quota))
         .route("/api/usage", get(token_usage))
+        .route("/api/git/status", get(git_status))
+        .route("/api/git/diff", get(git_diff))
+        .route("/api/git/action", post(git_action))
+        .route("/api/git/commit-message", post(git_commit_message))
         .route("/api/runs", get(running).post(start_turn))
         .route("/api/runs/{id}", get(turn))
         .route("/api/runs/{id}/events", get(stream::events))
@@ -478,6 +483,80 @@ async fn quota(Path(provider): Path<Provider>) -> Result<Json<Quota>, ApiError> 
 
 async fn token_usage(State(web): State<Web>) -> Result<Json<UsageReport>, ApiError> {
     blocking(move || Ok(web.service.token_usage())).await
+}
+
+#[derive(Deserialize)]
+struct GitStatusQuery {
+    cwd: String,
+}
+
+async fn git_status(
+    State(web): State<Web>,
+    Query(query): Query<GitStatusQuery>,
+) -> Result<Json<crate::git::GitStatus>, ApiError> {
+    blocking(move || web.service.git_status(std::path::Path::new(&query.cwd))).await
+}
+
+#[derive(Deserialize)]
+struct GitDiffQuery {
+    cwd: String,
+    scope: crate::git::GitDiffScope,
+    path: Option<String>,
+    commit: Option<String>,
+}
+
+async fn git_diff(
+    State(web): State<Web>,
+    Query(query): Query<GitDiffQuery>,
+) -> Result<Json<crate::git::GitDiff>, ApiError> {
+    let request = crate::git::GitDiffRequest {
+        scope: query.scope,
+        path: query.path,
+        commit: query.commit,
+    };
+    blocking(move || web.service.git_diff(std::path::Path::new(&query.cwd), &request)).await
+}
+
+#[derive(Deserialize)]
+struct GitActionRequest {
+    cwd: String,
+    #[serde(flatten)]
+    action: crate::git::GitAction,
+}
+
+async fn git_action(
+    State(web): State<Web>,
+    Json(request): Json<GitActionRequest>,
+) -> Result<Json<crate::git::GitActionResult>, ApiError> {
+    blocking(move || web.service.git_action(std::path::Path::new(&request.cwd), &request.action))
+        .await
+}
+
+#[derive(Deserialize)]
+struct GitCommitMessageRequest {
+    cwd: String,
+    #[serde(default)]
+    amend: bool,
+    provider: Option<Provider>,
+    model: Option<String>,
+    language: Option<String>,
+}
+
+async fn git_commit_message(
+    State(web): State<Web>,
+    Json(request): Json<GitCommitMessageRequest>,
+) -> Result<Json<Value>, ApiError> {
+    blocking(move || {
+        let message = web.service.git_generate_commit_message(
+            std::path::Path::new(&request.cwd),
+            request.amend,
+            request.provider,
+            request.model.as_deref(),
+            request.language.as_deref(),
+        )?;
+        Ok(json!({"message": message}))
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -796,6 +875,18 @@ async fn preview(State(web): State<Web>, Path(key): Path<String>) -> Result<Resp
         image.png_bytes().to_vec(),
     )
         .into_response())
+}
+
+async fn file_preview(
+    State(web): State<Web>,
+    Path(key): Path<String>,
+) -> Result<Json<reply::FilePreview>, ApiError> {
+    tokio::task::spawn_blocking(move || web.previews.file(&key))
+        .await
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "本机任务失败".into()))?
+        .ok_or_else(|| ApiError::missing("文件预览已失效，请刷新会话。".into()))?
+        .map(Json)
+        .map_err(|error| ApiError(StatusCode::BAD_REQUEST, error.into()))
 }
 
 async fn stop_turn(State(web): State<Web>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {

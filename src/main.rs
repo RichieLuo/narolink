@@ -2,6 +2,8 @@
 
 mod desktop;
 mod engine;
+mod file_preview;
+mod git;
 mod service;
 mod settings;
 mod web;

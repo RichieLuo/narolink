@@ -31,9 +31,18 @@ var webAssets embed.FS
 const (
 	webLimit       = 18 << 20
 	replyLimit     = 34 << 20
+	maxWireBody    = 24 << 20
 	cookieDuration = 30 * 24 * 60 * 60
 	deviceCookie   = "narolink_remote"
 	scopedCookie   = "narolink_device"
+
+	globalSlotsLimit   = 64
+	globalStreamsLimit = 64
+	globalUploadsLimit = 4
+	deviceSlotsLimit   = 8
+	deviceStreamsLimit = 8
+	deviceUploadsLimit = 2
+	maxTrackedDevices  = 4096
 )
 
 type command struct {
@@ -59,6 +68,22 @@ type waiting struct {
 	reply   chan answer
 	stream  chan *io.PipeReader
 	context context.Context
+
+	// WSS multiplexed session fields (nil/unused for legacy long-polling).
+	session          *wsSession
+	wsHead           chan wsResponseHead
+	wsChunks         chan wsChunk
+	wsStreamStart    chan struct{}
+	wsStream         chan []byte
+	wsClosed         chan struct{}
+	wsMu             sync.Mutex
+	wsAborted        bool
+	wsAbortReason    string
+	wsTotalBytes     int
+	wsBufferedBytes  int
+	wsChunksClosed   bool
+	wsStreamBuffered int
+	wsStreamClosed   bool
 }
 
 type relay struct {
@@ -77,18 +102,31 @@ type relay struct {
 }
 
 type desktop struct {
-	key   [32]byte
-	queue chan string
+	key     [32]byte
+	queue   chan string
+	slots   chan struct{}
+	streams chan struct{}
+	uploads chan struct{}
 
 	mu        sync.Mutex
 	name      string
 	streaming bool
 	lastPoll  time.Time
+	lastSeen  time.Time
+	ws        *wsSession
 	waiting   map[string]*waiting
 }
 
 func newDesktop(key [32]byte) *desktop {
-	return &desktop{key: key, queue: make(chan string, 32), waiting: make(map[string]*waiting)}
+	return &desktop{
+		key:      key,
+		queue:    make(chan string, 32),
+		slots:    make(chan struct{}, deviceSlotsLimit),
+		streams:  make(chan struct{}, deviceStreamsLimit),
+		uploads:  make(chan struct{}, deviceUploadsLimit),
+		lastSeen: time.Now(),
+		waiting:  make(map[string]*waiting),
+	}
 }
 
 func main() {
@@ -141,8 +179,11 @@ func newRelay(publicURL, token string) (*relay, error) {
 	key := sha256.Sum256([]byte(token))
 	return &relay{
 		origin: origin.Scheme + "://" + origin.Host, host: origin.Host, secure: secure, token: key,
-		assets: assets, slots: make(chan struct{}, 12), streams: make(chan struct{}, 16), uploads: make(chan struct{}, 2),
-		legacy: newDesktop(key), devices: make(map[string]*desktop),
+		assets:  assets,
+		slots:   make(chan struct{}, globalSlotsLimit),
+		streams: make(chan struct{}, globalStreamsLimit),
+		uploads: make(chan struct{}, globalUploadsLimit),
+		legacy:  newDesktop(key), devices: make(map[string]*desktop),
 	}, nil
 }
 
@@ -211,10 +252,49 @@ func (r *relay) registerDevice(id string, key [32]byte) *desktop {
 	defer r.mu.Unlock()
 	target := r.devices[id]
 	if target == nil {
+		if len(r.devices) >= maxTrackedDevices {
+			r.evictOldestOfflineLocked()
+		}
 		target = newDesktop(key)
 		r.devices[id] = target
+	} else {
+		target.mu.Lock()
+		target.lastSeen = time.Now()
+		target.mu.Unlock()
 	}
 	return target
+}
+
+func (r *relay) evictOldestOfflineLocked() {
+	var victimID string
+	var oldest time.Time
+	for id, dev := range r.devices {
+		dev.mu.Lock()
+		offline := dev.ws == nil && time.Since(dev.lastPoll) >= 45*time.Second && len(dev.waiting) == 0
+		seen := dev.lastSeen
+		dev.mu.Unlock()
+		if offline && (victimID == "" || seen.Before(oldest)) {
+			victimID = id
+			oldest = seen
+		}
+	}
+	if victimID != "" {
+		delete(r.devices, victimID)
+	}
+}
+
+func (r *relay) activeWSCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, dev := range r.devices {
+		dev.mu.Lock()
+		if dev.ws != nil {
+			count++
+		}
+		dev.mu.Unlock()
+	}
+	return count
 }
 
 func (r *relay) desktop(w http.ResponseWriter, req *http.Request) {
@@ -224,12 +304,7 @@ func (r *relay) desktop(w http.ResponseWriter, req *http.Request) {
 		fail(w, http.StatusUnauthorized, "桌面连接密钥错误")
 		return
 	}
-	if req.Method != http.MethodPost {
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		return
-	}
 	path := strings.TrimPrefix(req.URL.Path, "/relay/")
-	target := r.legacy
 	if route, scoped := strings.CutPrefix(path, "devices/"); scoped {
 		id, operation, ok := strings.Cut(route, "/")
 		if !ok || !validDeviceID(id) {
@@ -242,6 +317,14 @@ func (r *relay) desktop(w http.ResponseWriter, req *http.Request) {
 			fail(w, http.StatusForbidden, "设备连接密钥不匹配")
 			return
 		}
+		if operation == "ws" {
+			r.desktopWS(w, req, id, [32]byte(deviceKey))
+			return
+		}
+		if req.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		path = operation
 		if path == "hello" {
 			var identity struct {
@@ -252,21 +335,32 @@ func (r *relay) desktop(w http.ResponseWriter, req *http.Request) {
 				fail(w, http.StatusBadRequest, "设备信息无效")
 				return
 			}
-			target = r.registerDevice(id, [32]byte(deviceKey))
+			target := r.registerDevice(id, [32]byte(deviceKey))
 			target.mu.Lock()
 			target.name = strings.TrimSpace(identity.Name)
 			target.streaming = identity.Streaming
 			target.lastPoll = time.Now()
+			target.lastSeen = time.Now()
 			target.mu.Unlock()
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		target = r.findDevice(id)
+		target := r.findDevice(id)
 		if target == nil {
 			http.NotFound(w, req)
 			return
 		}
+		r.desktopLegacyOps(w, req, target, path)
+		return
 	}
+	if req.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	r.desktopLegacyOps(w, req, r.legacy, path)
+}
+
+func (r *relay) desktopLegacyOps(w http.ResponseWriter, req *http.Request, target *desktop, path string) {
 	if path == "hello" {
 		target.touch()
 		w.WriteHeader(http.StatusNoContent)
@@ -284,7 +378,7 @@ func (r *relay) desktop(w http.ResponseWriter, req *http.Request) {
 	target.mu.Lock()
 	job := target.waiting[id]
 	target.mu.Unlock()
-	if job == nil {
+	if job == nil || job.session != nil {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -307,8 +401,16 @@ func (r *relay) desktop(w http.ResponseWriter, req *http.Request) {
 
 func (d *desktop) touch() {
 	d.mu.Lock()
-	d.lastPoll = time.Now()
+	now := time.Now()
+	d.lastPoll = now
+	d.lastSeen = now
 	d.mu.Unlock()
+}
+
+func (d *desktop) currentWS() *wsSession {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ws
 }
 
 func (d *desktop) poll(w http.ResponseWriter, req *http.Request) {
@@ -321,7 +423,7 @@ func (d *desktop) poll(w http.ResponseWriter, req *http.Request) {
 			d.mu.Lock()
 			task := d.waiting[id]
 			d.mu.Unlock()
-			if task != nil {
+			if task != nil && task.session == nil {
 				writeJSON(w, http.StatusOK, task.work)
 				return
 			}
@@ -379,28 +481,45 @@ func (r *relay) browser(w http.ResponseWriter, req *http.Request, target *deskto
 		return
 	}
 	stream := req.Method == http.MethodGet && runEventPath(path)
-	slots := r.slots
+	deviceSlots := target.slots
+	globalSlots := r.slots
 	if stream {
 		if !streaming {
 			fail(w, http.StatusNotImplemented, "电脑端需要更新才能推送实时回复")
 			return
 		}
-		slots = r.streams
+		deviceSlots = target.streams
+		globalSlots = r.streams
 	}
 	select {
-	case slots <- struct{}{}:
-		defer func() { <-slots }()
+	case deviceSlots <- struct{}{}:
+		defer func() { <-deviceSlots }()
+	default:
+		fail(w, http.StatusServiceUnavailable, "该电脑请求较多，请稍后重试")
+		return
+	}
+	select {
+	case globalSlots <- struct{}{}:
+		defer func() { <-globalSlots }()
 	default:
 		fail(w, http.StatusServiceUnavailable, "电脑请求较多，请稍后重试")
 		return
 	}
 	limit := int64(4096)
 	followUp := strings.HasPrefix(path, "/api/runs/") && strings.HasSuffix(path, "/messages")
-	if write && strings.HasPrefix(path, "/api/runs/") && strings.HasSuffix(path, "/answer") {
+	if write && (strings.HasPrefix(path, "/api/runs/") && strings.HasSuffix(path, "/answer") ||
+		path == "/api/git/action" || path == "/api/git/commit-message") {
 		limit = 64 * 1024
 	}
 	if write && (path == "/api/runs" || followUp) {
 		limit = webLimit
+		select {
+		case target.uploads <- struct{}{}:
+			defer func() { <-target.uploads }()
+		default:
+			fail(w, http.StatusServiceUnavailable, "该电脑有其他消息正在上传")
+			return
+		}
 		select {
 		case r.uploads <- struct{}{}:
 			defer func() { <-r.uploads }()
@@ -433,6 +552,13 @@ func (r *relay) browser(w http.ResponseWriter, req *http.Request, target *deskto
 	if paired {
 		work.Cookie = "narolink=" + inner
 	}
+
+	ws := target.currentWS()
+	if ws != nil {
+		r.browserWS(w, req, target, ws, scope, cookieName, pair, name, id, work)
+		return
+	}
+
 	job := &waiting{work: work, reply: make(chan answer, 1), context: req.Context()}
 	if stream {
 		job.stream = make(chan *io.PipeReader)
@@ -475,10 +601,107 @@ func (r *relay) browser(w http.ResponseWriter, req *http.Request, target *deskto
 	}
 }
 
+func (r *relay) browserWS(
+	w http.ResponseWriter,
+	req *http.Request,
+	target *desktop,
+	ws *wsSession,
+	scope, cookieName string,
+	pair bool,
+	name string,
+	rawID [16]byte,
+	work command,
+) {
+	key := work.ID
+	job := &waiting{
+		work:     work,
+		context:  req.Context(),
+		session:  ws,
+		wsHead:   make(chan wsResponseHead, 1),
+		wsChunks: make(chan wsChunk, 256),
+		wsClosed: make(chan struct{}),
+	}
+	if work.Stream {
+		job.wsStreamStart = make(chan struct{}, 1)
+		job.wsStream = make(chan []byte, 256)
+	}
+	target.mu.Lock()
+	if target.ws != ws {
+		target.mu.Unlock()
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "电脑未连接。请打开 Naro。", "online": false,
+		})
+		return
+	}
+	target.waiting[key] = job
+	target.mu.Unlock()
+	defer func() {
+		target.mu.Lock()
+		delete(target.waiting, key)
+		target.mu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(req.Context(), 33*time.Second)
+	defer cancel()
+
+	if err := ws.dispatch(ctx, job, rawID); err != nil {
+		if req.Context().Err() != nil {
+			ws.sendCancel(key)
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": "电脑连接已断开，请确认状态后再重试", "online": false,
+		})
+		return
+	}
+
+	if work.Stream {
+		select {
+		case <-job.wsStreamStart:
+			serveWSStream(w, req, job)
+		case head := <-job.wsHead:
+			serveWSResponse(w, req, job, head)
+		case <-job.wsClosed:
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"error": "电脑连接已断开，请确认状态后再重试", "online": false,
+			})
+		case <-ctx.Done():
+			ws.sendCancel(key)
+			fail(w, http.StatusGatewayTimeout, "等待电脑响应超时")
+		}
+		return
+	}
+
+	select {
+	case head := <-job.wsHead:
+		if pair && head.status == http.StatusOK {
+			cookie, err := http.ParseSetCookie(head.setCookie)
+			if err != nil || cookie.Name != "narolink" || cookie.Value == "" {
+				fail(w, http.StatusBadGateway, "电脑没有完成配对")
+				return
+			}
+			http.SetCookie(w, &http.Cookie{Name: cookieName, Value: target.wrap(cookie.Value, scope), Path: scope, MaxAge: cookieDuration, HttpOnly: true, Secure: r.secure, SameSite: http.SameSiteStrictMode})
+			if name != "" {
+				writeJSON(w, http.StatusOK, map[string]any{"paired": true, "name": name})
+				return
+			}
+		}
+		serveWSResponse(w, req, job, head)
+	case <-job.wsClosed:
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": "电脑连接已断开，请确认状态后再重试", "online": false,
+		})
+	case <-ctx.Done():
+		ws.sendCancel(key)
+		fail(w, http.StatusGatewayTimeout, "等待电脑响应超时")
+	}
+}
+
 func (d *desktop) info() (bool, string, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return time.Since(d.lastPoll) < 45*time.Second, d.name, d.streaming
+	online := d.ws != nil || time.Since(d.lastPoll) < 45*time.Second
+	return online, d.name, d.streaming
 }
 
 func (d *desktop) sign(value []byte, scope string) []byte {

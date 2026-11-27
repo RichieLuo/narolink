@@ -2,7 +2,17 @@
 
 [简体中文](README.md) · **English** · [日本語](README.ja.md)
 
-Pick up your Codex, Claude Code, and Antigravity sessions from a computer, phone, or tablet. Naro runs the CLI on the host computer. Connect from the Naro desktop app on another computer or from the web on a phone or tablet. The host initiates the connection to the Go relay and needs no inbound ports. Each CLI manages its own session history. The relay forwards requests and responses in memory.
+Pick up your Codex, Claude Code, and Antigravity sessions from a computer, phone, or tablet. Naro runs the CLI on the host computer. Connect from the Naro desktop app on another computer or from the web on a phone or tablet.
+
+## How the relay works
+
+**The Naro Go relay does not persist user data.** Messages, attachments, file previews, and pairing records are never written to disk on the relay and only pass through in memory. Each CLI manages its session history on the host, and Naro reads project files from the host's workspace.
+
+![Naro relay flow. The host opens a single outbound WSS connection and sends heartbeats when idle. The Go relay multiplexes HTTPS requests and SSE replies in memory.](assets/readme/relay.en.png)
+
+Each host opens **one outbound WSS connection** to the Go relay with no inbound ports required, sending only heartbeats while idle. The relay multiplexes concurrent requests, chunked responses, and streamed replies over that single connection by request ID, so stop, approval, and follow-up requests stay responsive during streaming. Browsers and remote desktops continue using the existing HTTPS API and SSE. The host verifies the pairing code and clients keep the pairing credential. The relay keeps only in-memory device routing, names, and online status, cleaning up pending requests immediately on completion, timeout, or disconnect. After a disconnect or relay restart, the host reconnects with jittered exponential backoff without automatically re-running side-effecting requests. New desktop builds fall back to HTTPS long polling only after confirming an older relay does not support WSS, and the new relay remains compatible with older desktop clients.
+
+The HTTPS reverse proxy (Nginx) in the official deployment keeps access logs that include source IP addresses and request paths.
 
 ## Get started
 
@@ -16,7 +26,7 @@ Open an existing session from the sidebar, or choose an engine and a working dir
 - Open **Usage → Token usage** to view total and per-engine counts for the past 24 hours, 7 days, or 30 days. Input counts include cache reads and writes. Naro uses the connected computer's CLI history, including archived Codex sessions and Antigravity's SQLite sessions. **Account limits** shows the remaining provider allowances and reset times.
 - Send follow-ups during a reply on desktop or web. **Queue** sends messages in order after the current turn. **Steer** sends a new or queued message into the current turn using its existing model (supported for Codex, Claude Code, and Antigravity). Change the send mode in **Settings → Sessions**. Each client remembers its selection and defaults to Queue. Clear the draft during a run to reveal **Stop**. Stopping marks the remaining queued messages as unsent.
 - Select **Withdraw to edit** in the queue above the composer to bring a message and its images back into the editor. Use **Switch draft** to return to a message you were already writing. Resending puts the edited message at the end of the queue. The copy icon works on your messages and assistant replies.
-- On desktop, click a local file link in an assistant reply to open a read-only preview on the right, with copy, reload, and **Show in folder** actions. Markdown renders by default; switch between **Preview / Source**. Other UTF-8 text files show source. The limit is 2 MiB per file; Markdown larger than 256 KiB shows source only. On smaller windows, the session list hides while previewing and returns when the preview closes.
+- Click a file link in an assistant reply to open a read-only preview with copy and reload actions. It opens on the right on computers and fills the screen in phone browsers. The web app previews files within the session's working directory. Markdown renders by default, with **Preview / Source** controls. Other UTF-8 text files show source. Files are limited to 2 MiB, and Markdown larger than 256 KiB shows source only. The desktop app also supports **Show in folder** and hides the session list while previewing in a small window.
 - Press **Enter** to send or **Shift+Enter** for a new line. Paste text, screenshots, or images with **⌘V** (macOS), **Ctrl+V**, or the right-click menu.
 - Attach up to four PNG, JPEG, GIF, or WebP images per message, with a combined source size of 12 MiB. The image picker is also available on desktop and web. The host validates and normalizes the images before passing them to the CLI. The browser can preview images from recent runs.
 
@@ -40,7 +50,49 @@ export NAROLINK_RELAY_TOKEN="$(openssl rand -hex 32)"
 | `NAROLINK_RELAY_ADDR` | Relay listen address. Defaults to `127.0.0.1:7319` |
 | `NAROLINK_TLS_CERT`, `NAROLINK_TLS_KEY` | Optional. Set both the certificate and key files to serve HTTPS directly from Go |
 
-If you use an HTTPS reverse proxy, preserve the original `Host` header, allow request bodies of at least 36 MiB, and set a response timeout of at least 45 seconds. Here is a Caddy configuration.
+If you use an HTTPS reverse proxy, preserve the original `Host` header, enable HTTP/1.1 WebSocket upgrades (`Upgrade` / `Connection`), allow request bodies of at least 36 MiB, and disable response buffering for WSS and SSE. Here is an Nginx configuration for a single Go relay service:
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name naro.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/naro.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/naro.example.com/privkey.pem;
+
+    client_max_body_size 36m;
+
+    # Single host-to-relay WSS connection (25s idle heartbeat)
+    location ~ ^/relay/devices/[a-f0-9]{32}/ws$ {
+        proxy_pass http://127.0.0.1:7319;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+    }
+
+    # Browser HTTPS API, SSE reply streams, and legacy long-polling compatibility
+    location / {
+        proxy_pass http://127.0.0.1:7319;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_read_timeout 90s;
+        proxy_send_timeout 90s;
+    }
+}
+```
+
+With Caddy, a standard reverse proxy works out of the box:
 
 ```caddyfile
 naro.example.com {
@@ -114,6 +166,7 @@ The following endpoints are available after pairing. When connecting through the
 | `POST /api/runs/{id}/messages/{message_id}/withdraw` | Withdraw a pending message and return its `prompt` and Base64-encoded PNG `images`. Pass `display_name` on upload to keep each original filename |
 | `GET /api/runs/{id}/images/{index}` | Fetch a normalized PNG from a recent run |
 | `GET /api/previews/{key}` | Fetch an image preview referenced by a message |
+| `GET /api/file-previews/{key}` | Read a linked text file within the working directory, with a rendered Markdown preview when available |
 | `POST /api/runs/{id}/stop` | Stop the run |
 | `POST /api/runs/{id}/approval` | Submit `approval_id` and a Boolean `allow` |
 | `POST /api/runs/{id}/answer` | Submit `question_id` and `answers`, a map from individual question IDs to arrays of selected options or custom text |
