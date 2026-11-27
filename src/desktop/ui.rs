@@ -19,7 +19,7 @@ use std::{collections::BTreeSet, path::Path};
 const COLUMN: f32 = 744.;
 const TITLE_BAR_HEIGHT: f32 = 38.;
 const WINDOW_BUTTONS_INSET: i8 = if cfg!(target_os = "macos") { 88 } else { 20 };
-const QR_DISPLAY_SIZE: f32 = 168.;
+const QR_DISPLAY_SIZE: f32 = 128.;
 const COMPOSER_MIN_EDITOR_ROWS: usize = 2;
 const COMPOSER_MAX_EDITOR_HEIGHT: f32 = 172.;
 const ACTION_DIALOG_INSET: i8 = 22;
@@ -423,6 +423,22 @@ fn window_drag_area(ui: &Ui, rect: Rect) {
 pub(super) struct PairingQr {
     link: String,
     texture: Option<egui::TextureHandle>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(super) enum DeviceTab {
+    #[default]
+    Connect,
+    PairThisComputer,
+}
+
+impl DeviceTab {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Connect => "连接其他设备",
+            Self::PairThisComputer => "本机配对",
+        }
+    }
 }
 
 impl PairingQr {
@@ -3381,181 +3397,67 @@ impl Desktop {
         } else {
             self.pairing_qr = None;
         }
-        let modal = egui::Modal::new(egui::Id::new("device connection"))
-            .frame(popup(palette, Margin::same(24)).corner_radius(18))
-            .backdrop_color(palette.backdrop.gamma_multiply(open_t))
-            .show(ctx, |ui| {
-                ui.set_width(600.);
-                let mut close = false;
-                ui.horizontal(|ui| {
-                    let (icon, _) = ui.allocate_exact_size(vec2(36., 36.), egui::Sense::hover());
-                    ui.painter().rect_filled(icon, 10., palette.tint);
-                    Icon::Devices.paint(ui.painter(), icon.center(), palette.accent);
-                    ui.add_space(3.);
-                    ui.label(RichText::new(language.text("设备连接")).size(23.).strong());
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        close = Icon::Close
-                            .button(ui, language.text("关闭"), palette.muted)
-                            .clicked();
+        let local_link = pairing_link(self.gateway.local_url(), &code);
+        let mut tab = self.device_tab;
+        let modal = show_device_modal(
+            ctx,
+            &mut tab,
+            remote.connected,
+            &remote.detail,
+            open_t,
+            |ui, tab| match (tab, device_url) {
+                (DeviceTab::Connect, _) => self.connect_to_device(ui),
+                (DeviceTab::PairThisComputer, Some(address)) => {
+                    pairing_card(
+                        ui,
+                        self.pairing_qr.as_ref().and_then(|qr| qr.texture.as_ref()),
+                        address,
+                        &code,
+                    );
+                    ui.add_space(4.);
+                    egui::CollapsingHeader::new(language.text("中继设置"))
+                        .id_salt("relay server")
+                        .show(ui, |ui| self.relay_fields(ui));
+                }
+                (DeviceTab::PairThisComputer, None) => {
+                    surface(palette, palette.canvas, Margin::same(14)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new(language.text("让其他设备连接本机"))
+                                .size(16.)
+                                .strong(),
+                        );
+                        ui.label(
+                            RichText::new(language.text("连接中继服务器后即可显示配对二维码。"))
+                                .color(palette.muted)
+                                .size(13.),
+                        );
+                        ui.label(
+                            RichText::new(language.text(&remote.detail))
+                                .color(palette.warn)
+                                .size(13.),
+                        );
                         ui.add_space(4.);
-                        let (label, fill, ink) = if remote.connected {
-                            ("本机在线", palette.online_bg, palette.online)
-                        } else {
-                            ("本机未上线", palette.soft, palette.muted)
-                        };
-                        let label = language.text(label);
-                        let galley = ui.fonts_mut(|fonts| {
-                            fonts.layout_no_wrap(label.to_owned(), FontId::proportional(12.), ink)
-                        });
-                        let (chip, response) = ui.allocate_exact_size(
-                            galley.size() + vec2(32., 8.),
-                            egui::Sense::hover(),
-                        );
-                        let painter = ui.painter();
-                        painter.rect_filled(chip, chip.height() / 2., fill);
-                        painter.circle_filled(
-                            egui::pos2(chip.left() + 13., chip.center().y),
-                            3.,
-                            ink,
-                        );
-                        painter.galley(chip.min + vec2(22., 4.), galley, ink);
-                        response
-                            .widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, label));
-                        response.on_hover_text(language.text(&remote.detail));
+                        self.relay_fields(ui);
                     });
-                });
-                ui.add_space(10.);
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, true])
-                    .max_height((ctx.content_rect().height() - 128.).max(120.))
-                    .show(ui, |ui| {
-                        self.connect_to_device(ui);
-                        ui.add_space(9.);
-                        if let Some(address) = device_url {
-                            self.pairing_card(ui, address, &code);
-                        } else {
-                            surface(palette, palette.canvas, Margin::same(16)).show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.label(
-                                    RichText::new(language.text("让其他设备连接本机"))
-                                        .size(19.)
-                                        .strong(),
-                                );
-                                ui.label(
-                                    RichText::new(
-                                        language.text("连接中继服务器后即可显示配对二维码。"),
-                                    )
-                                    .color(palette.muted)
-                                    .size(13.),
-                                );
-                                ui.label(
-                                    RichText::new(language.text(&remote.detail))
-                                        .color(palette.warn)
-                                        .size(13.),
-                                );
-                                ui.add_space(4.);
-                                self.relay_fields(ui);
-                            });
-                        }
-                        if remote.connected {
-                            ui.add_space(4.);
-                            egui::CollapsingHeader::new(language.text("中继设置"))
-                                .id_salt("relay server")
-                                .show(ui, |ui| self.relay_fields(ui));
-                        }
-                    });
-                ui.add_space(5.);
-                ui.separator();
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button(language.text("打开本机网页")).clicked() {
-                        let link = pairing_link(self.gateway.local_url(), &code);
-                        ctx.open_url(egui::OpenUrl::new_tab(link));
-                    }
-                    if let Some(url) = &remote.url
-                        && ui.button(language.text("打开中继网页")).clicked()
-                    {
-                        ctx.open_url(egui::OpenUrl::new_tab(url.clone()));
-                    }
-                });
-                close
-            });
+                }
+            },
+            |ui| {
+                if ui.button(language.text("打开本机网页")).clicked() {
+                    ctx.open_url(egui::OpenUrl::new_tab(local_link));
+                }
+                if let Some(url) = &remote.url
+                    && ui.button(language.text("打开中继网页")).clicked()
+                {
+                    ctx.open_url(egui::OpenUrl::new_tab(url.clone()));
+                }
+            },
+        );
+        self.device_tab = tab;
         if modal.inner || modal.should_close() {
             self.pair_dialog = false;
             self.pairing_qr = None;
         }
-    }
-
-    fn pairing_card(&self, ui: &mut Ui, address: &str, code: &str) {
-        let palette = Palette::of(ui);
-        let language = Language::in_ui(ui);
-        surface(palette, palette.tint, Margin::same(16))
-            .stroke(Stroke::new(1., palette.tint_line))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    let texture = self.pairing_qr.as_ref().and_then(|qr| qr.texture.as_ref());
-                    if let Some(texture) = texture {
-                        PairingQr::paint(texture, ui);
-                        ui.add_space(14.);
-                    }
-                    ui.allocate_ui_with_layout(
-                        vec2(ui.available_width(), 68.),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            ui.label(
-                                RichText::new(language.text("手机扫码连接"))
-                                    .size(24.)
-                                    .strong(),
-                            );
-                            let hint = if texture.is_some() {
-                                "用手机相机扫描二维码，打开链接即可连接本机。"
-                            } else {
-                                "无法生成二维码，请展开手动配对。"
-                            };
-                            ui.label(
-                                RichText::new(language.text(hint))
-                                    .size(14.)
-                                    .color(palette.muted),
-                            );
-                        },
-                    );
-                });
-            });
-        ui.add_space(3.);
-        egui::CollapsingHeader::new(language.text("手动配对"))
-            .id_salt("manual pairing")
-            .show(ui, |ui| {
-                surface(palette, palette.canvas, Margin::same(12)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(language.text("配对码"))
-                                .size(13.)
-                                .color(palette.muted),
-                        );
-                        ui.label(
-                            RichText::new(code)
-                                .monospace()
-                                .size(19.)
-                                .color(palette.accent),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button(language.text("复制设备地址")).clicked() {
-                                ui.ctx().copy_text(address.to_owned());
-                            }
-                        });
-                    });
-                    ui.add(
-                        Label::new(
-                            RichText::new(address)
-                                .monospace()
-                                .size(12.)
-                                .color(palette.muted),
-                        )
-                        .wrap(),
-                    );
-                });
-            });
     }
 
     fn connect_to_device(&mut self, ui: &mut Ui) {
@@ -3603,64 +3505,15 @@ impl Desktop {
                 ui.add_space(5.);
                 ui.separator();
             }
-            ui.label(
-                RichText::new(language.text("连接另一台设备"))
-                    .size(15.)
-                    .strong(),
-            );
-            ui.label(
-                RichText::new(
-                    language.text("设备地址和配对码在目标电脑的「设备连接 → 手动配对」中。"),
-                )
-                .size(12.5)
-                .color(palette.muted),
-            );
-            let enter = ui
-                .add_enabled_ui(!pending, |ui| {
-                    let address_label =
-                        ui.label(RichText::new(language.text("设备地址")).color(palette.muted));
-                    let address = input::text_edit(
-                        ui,
-                        TextEdit::singleline(&mut self.target_device_url)
-                            .desired_width(f32::INFINITY)
-                            .margin(Margin::symmetric(9, 7))
-                            .hint_text(language.text("粘贴目标电脑提供的设备地址")),
-                        false,
-                    )
-                    .labelled_by(address_label.id);
-                    let code_label =
-                        ui.label(RichText::new(language.text("配对码")).color(palette.muted));
-                    let code = input::text_edit(
-                        ui,
-                        TextEdit::singleline(&mut self.target_device_code)
-                            .desired_width(132.)
-                            .margin(Margin::symmetric(9, 7))
-                            .hint_text(language.text("8 位数字")),
-                        false,
-                    )
-                    .labelled_by(code_label.id);
-                    if address.changed() || code.changed() {
-                        self.target_device_error = None;
-                    }
-                    (address.lost_focus() || code.lost_focus())
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                })
-                .inner;
-            let label = if pending {
-                "正在配对…"
-            } else {
-                "配对并连接"
-            };
-            let clicked = ui
-                .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    action_dialog_primary(ui, language.text(label), can_switch)
-                })
-                .inner;
-            if can_switch && (clicked || enter) {
+            if remote_pairing_form(
+                ui,
+                &mut self.target_device_url,
+                &mut self.target_device_code,
+                &mut self.target_device_error,
+                pending,
+                can_switch,
+            ) {
                 self.connect_device(ui.ctx());
-            }
-            if let Some(error) = &self.target_device_error {
-                ui.label(RichText::new(language.text(error)).color(palette.warn));
             }
         });
     }
@@ -3717,6 +3570,279 @@ impl Desktop {
             ui.label(RichText::new(language.text(note)).color(palette.warn));
         }
     }
+}
+
+fn show_device_modal(
+    ctx: &egui::Context,
+    tab: &mut DeviceTab,
+    online: bool,
+    detail: &str,
+    opacity: f32,
+    body: impl FnOnce(&mut Ui, DeviceTab),
+    footer: impl FnOnce(&mut Ui),
+) -> egui::ModalResponse<bool> {
+    let palette = Palette::from_context(ctx);
+    let screen = ctx.content_rect();
+    egui::Modal::new(egui::Id::new("device connection"))
+        .frame(popup(palette, Margin::same(20)).corner_radius(18))
+        .backdrop_color(palette.backdrop.gamma_multiply(opacity))
+        .show(ctx, |ui| {
+            let language = Language::in_ui(ui);
+            ui.set_width((screen.width() - 64.).clamp(1., 520.));
+            ui.spacing_mut().item_spacing.y = 5.;
+            let close = ui
+                .allocate_ui_with_layout(
+                    vec2(ui.available_width(), 36.),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        let (icon, _) =
+                            ui.allocate_exact_size(vec2(34., 34.), egui::Sense::hover());
+                        ui.painter().rect_filled(icon, 9., palette.tint);
+                        Icon::Devices.paint(ui.painter(), icon.center(), palette.accent);
+                        ui.add_space(3.);
+                        ui.label(RichText::new(language.text("设备连接")).size(22.).strong());
+                        ui.allocate_ui_with_layout(
+                            vec2(ui.available_width(), 36.),
+                            Layout::right_to_left(Align::Center),
+                            |ui| {
+                                let close = Icon::Close
+                                    .button(ui, language.text("关闭"), palette.muted)
+                                    .clicked();
+                                if *tab != DeviceTab::PairThisComputer {
+                                    return close;
+                                }
+                                ui.add_space(4.);
+                                let (label, fill, ink) = if online {
+                                    ("本机在线", palette.online_bg, palette.online)
+                                } else {
+                                    ("本机未上线", palette.soft, palette.muted)
+                                };
+                                let label = language.text(label);
+                                let galley = ui.fonts_mut(|fonts| {
+                                    fonts.layout_no_wrap(
+                                        label.to_owned(),
+                                        FontId::proportional(12.),
+                                        ink,
+                                    )
+                                });
+                                let (chip, response) = ui.allocate_exact_size(
+                                    galley.size() + vec2(32., 8.),
+                                    egui::Sense::hover(),
+                                );
+                                let painter = ui.painter();
+                                painter.rect_filled(chip, chip.height() / 2., fill);
+                                painter.circle_filled(
+                                    egui::pos2(chip.left() + 13., chip.center().y),
+                                    3.,
+                                    ink,
+                                );
+                                painter.galley(chip.min + vec2(22., 4.), galley, ink);
+                                response.widget_info(|| {
+                                    WidgetInfo::labeled(WidgetType::Label, true, label)
+                                });
+                                response.on_hover_text(language.text(detail));
+                                close
+                            },
+                        )
+                        .inner
+                    },
+                )
+                .inner;
+            ui.add_space(6.);
+            ui.horizontal(|ui| {
+                let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.;
+                for choice in [DeviceTab::Connect, DeviceTab::PairThisComputer] {
+                    let selected = *tab == choice;
+                    if ui
+                        .add_sized(
+                            vec2(width, 32.),
+                            Button::new(RichText::new(language.text(choice.label())).strong())
+                                .selected(selected)
+                                .frame_when_inactive(selected),
+                        )
+                        .clicked()
+                    {
+                        *tab = choice;
+                    }
+                }
+            });
+            ui.add_space(8.);
+            egui::ScrollArea::vertical()
+                .id_salt(*tab)
+                .auto_shrink([false, true])
+                .max_height((screen.height() - 194.).max(1.))
+                .show(ui, |ui| body(ui, *tab));
+            if *tab == DeviceTab::PairThisComputer {
+                ui.add_space(4.);
+                ui.separator();
+                ui.allocate_ui_with_layout(
+                    vec2(ui.available_width(), 28.),
+                    Layout::right_to_left(Align::Center),
+                    footer,
+                );
+            }
+            close
+        })
+}
+
+fn remote_pairing_form(
+    ui: &mut Ui,
+    address: &mut String,
+    code: &mut String,
+    error: &mut Option<String>,
+    pending: bool,
+    can_switch: bool,
+) -> bool {
+    let palette = Palette::of(ui);
+    let language = Language::in_ui(ui);
+    ui.add(
+        Label::new(
+            RichText::new(language.text("在目标电脑打开「设备连接 → 本机配对 → 手动配对」。"))
+                .size(12.5)
+                .color(palette.muted),
+        )
+        .wrap(),
+    );
+    ui.add_space(4.);
+    let address_label = ui.label(RichText::new(language.text("设备地址")).color(palette.muted));
+    let address_input = ui
+        .add_enabled_ui(!pending, |ui| {
+            input::text_edit(
+                ui,
+                TextEdit::singleline(address)
+                    .desired_width(f32::INFINITY)
+                    .margin(Margin::symmetric(9, 7))
+                    .hint_text(RichText::new("https://…").color(palette.muted)),
+                false,
+            )
+            .labelled_by(address_label.id)
+        })
+        .inner;
+    let (code_input, clicked, can_pair) = ui
+        .allocate_ui_with_layout(
+            vec2(ui.available_width(), 36.),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                let code_label =
+                    ui.label(RichText::new(language.text("配对码")).color(palette.muted));
+                let code_input = ui
+                    .add_enabled_ui(!pending, |ui| {
+                        input::text_edit(
+                            ui,
+                            TextEdit::singleline(code)
+                                .desired_width(118.)
+                                .margin(Margin::symmetric(9, 7))
+                                .hint_text(
+                                    RichText::new(language.text("8 位数字")).color(palette.muted),
+                                ),
+                            false,
+                        )
+                        .labelled_by(code_label.id)
+                    })
+                    .inner;
+                let can_pair = can_switch
+                    && !address.trim().is_empty()
+                    && (!code.trim().is_empty() || address.contains("#pair="));
+                let label = if pending {
+                    "正在配对…"
+                } else {
+                    "配对并连接"
+                };
+                let clicked = ui
+                    .allocate_ui_with_layout(
+                        vec2(ui.available_width(), 36.),
+                        Layout::right_to_left(Align::Center),
+                        |ui| action_dialog_primary(ui, language.text(label), can_pair),
+                    )
+                    .inner;
+                (code_input, clicked, can_pair)
+            },
+        )
+        .inner;
+    if address_input.changed() || code_input.changed() {
+        *error = None;
+    }
+    if let Some(error) = error {
+        ui.add(Label::new(RichText::new(language.text(error)).color(palette.warn)).wrap());
+    }
+    let enter = (address_input.lost_focus() || code_input.lost_focus())
+        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+    can_pair && (clicked || enter)
+}
+
+fn pairing_card(ui: &mut Ui, qr: Option<&egui::TextureHandle>, address: &str, code: &str) {
+    let palette = Palette::of(ui);
+    let language = Language::in_ui(ui);
+    surface(palette, palette.tint, Margin::same(12))
+        .stroke(Stroke::new(1., palette.tint_line))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let height = if qr.is_some() { QR_DISPLAY_SIZE } else { 52. };
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_width(), height),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    if let Some(texture) = qr {
+                        PairingQr::paint(texture, ui);
+                        ui.add_space(12.);
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(language.text("手机扫码连接"))
+                                .size(17.)
+                                .strong(),
+                        );
+                        let hint = if qr.is_some() {
+                            "用手机相机扫描二维码，打开链接即可连接本机。"
+                        } else {
+                            "无法生成二维码，请展开手动配对。"
+                        };
+                        ui.add(
+                            Label::new(
+                                RichText::new(language.text(hint))
+                                    .size(13.)
+                                    .color(palette.muted),
+                            )
+                            .wrap(),
+                        );
+                    });
+                },
+            );
+        });
+    egui::CollapsingHeader::new(language.text("手动配对"))
+        .id_salt("manual pairing")
+        .show(ui, |ui| {
+            surface(palette, palette.canvas, Margin::same(12)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(language.text("配对码"))
+                            .size(13.)
+                            .color(palette.muted),
+                    );
+                    ui.label(
+                        RichText::new(code)
+                            .monospace()
+                            .size(19.)
+                            .color(palette.accent),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button(language.text("复制设备地址")).clicked() {
+                            ui.ctx().copy_text(address.to_owned());
+                        }
+                    });
+                });
+                ui.add(
+                    Label::new(
+                        RichText::new(address)
+                            .monospace()
+                            .size(12.)
+                            .color(palette.muted),
+                    )
+                    .wrap(),
+                );
+            });
+        });
 }
 
 fn show_quota_modal(
@@ -4782,6 +4908,171 @@ mod composer_tests {
         assert!(measure(&"a soft-wrapped line ".repeat(5)) > empty + 10.);
         assert_eq!(measure(&"long draft\n".repeat(60)), 120.);
         assert_eq!(measure(""), empty);
+    }
+}
+
+#[cfg(test)]
+mod device_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn device_dialog_stays_compact_and_pairing_remains_reachable() {
+        for language in Language::ALL {
+            for size in [vec2(760., 548.), vec2(1920., 997.)] {
+                let screen = Rect::from_min_size(egui::Pos2::ZERO, size);
+                let ctx = egui::Context::default();
+                setup(&ctx);
+                language.apply(&ctx);
+                let host = "https://naro.example.com/devices/00112233445566778899aabbccddeeff/";
+                let qr = PairingQr::new(&ctx, pairing_link(host, "12345678"));
+                let address = RefCell::new(String::new());
+                let code = RefCell::new(String::new());
+                let pair = Cell::new(false);
+                let tab = Cell::new(DeviceTab::default());
+                let bounds = Cell::new(Rect::NOTHING);
+                let render = |events| {
+                    ctx.run(
+                        egui::RawInput {
+                            screen_rect: Some(screen),
+                            events,
+                            ..Default::default()
+                        },
+                        |ctx| {
+                            let mut selected = tab.get();
+                            let modal =
+                                show_device_modal(
+                                    ctx,
+                                    &mut selected,
+                                    true,
+                                    "",
+                                    1.,
+                                    |ui, tab| match tab {
+                                        DeviceTab::Connect => {
+                                            let palette = Palette::of(ui);
+                                            surface(palette, palette.canvas, Margin::same(14))
+                                                .show(ui, |ui| {
+                                                    ui.set_width(ui.available_width());
+                                                    pair.set(remote_pairing_form(
+                                                        ui,
+                                                        &mut address.borrow_mut(),
+                                                        &mut code.borrow_mut(),
+                                                        &mut None,
+                                                        false,
+                                                        true,
+                                                    ));
+                                                });
+                                        }
+                                        DeviceTab::PairThisComputer => {
+                                            pairing_card(ui, qr.texture.as_ref(), host, "12345678");
+                                            ui.add_space(4.);
+                                            egui::CollapsingHeader::new(language.text("中继设置"))
+                                                .show(ui, |_| {});
+                                        }
+                                    },
+                                    |ui| {
+                                        let _ = ui.button(language.text("打开本机网页"));
+                                        let _ = ui.button(language.text("打开中继网页"));
+                                    },
+                                );
+                            tab.set(selected);
+                            bounds.set(modal.response.rect);
+                        },
+                    )
+                };
+
+                let settled = || {
+                    // The oversized row grew as egui reused the prior frame's area.
+                    for _ in 0..5 {
+                        render(vec![]);
+                    }
+                    let output = render(vec![]);
+                    let max_height = match tab.get() {
+                        DeviceTab::Connect => 350.,
+                        DeviceTab::PairThisComputer => 440.,
+                    };
+                    assert!(
+                        screen.shrink(12.).contains_rect(bounds.get())
+                            && bounds.get().height() < max_height,
+                        "{} {} modal {:?} in {screen:?}",
+                        language.code(),
+                        tab.get().label(),
+                        bounds.get(),
+                    );
+                    output
+                };
+                let text_rect = |output: &egui::FullOutput, label| {
+                    output
+                        .shapes
+                        .iter()
+                        .find_map(|clipped| match &clipped.shape {
+                            egui::Shape::Text(text)
+                                if text.galley.text() == language.text(label) =>
+                            {
+                                let rect = text.visual_bounding_rect();
+                                clipped
+                                    .clip_rect
+                                    .expand(1.)
+                                    .contains_rect(rect)
+                                    .then_some(rect)
+                            }
+                            _ => None,
+                        })
+                };
+                let visible_text = |output: &egui::FullOutput, label| {
+                    text_rect(output, label)
+                        .unwrap_or_else(|| panic!("Hidden device dialog label: {label}"))
+                };
+                let outgoing = settled();
+                let code_hint = visible_text(&outgoing, "8 位数字");
+                let button = visible_text(&outgoing, "配对并连接");
+                assert!((button.center().y - code_hint.center().y).abs() < 4.);
+                assert!(code_hint.right() < button.left());
+                assert!(text_rect(&outgoing, "手机扫码连接").is_none());
+                assert!(text_rect(&outgoing, "打开本机网页").is_none());
+
+                let click = |target: Rect| {
+                    let event = |pressed| egui::Event::PointerButton {
+                        pos: target.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    };
+                    render(vec![
+                        egui::Event::PointerMoved(target.center()),
+                        event(true),
+                        event(false),
+                    ])
+                };
+                click(button);
+                assert!(!pair.get());
+                *address.borrow_mut() = host.into();
+                *code.borrow_mut() = "12345678".into();
+                render(vec![]);
+                click(button);
+                assert!(
+                    pair.get(),
+                    "pair button must be clickable after entering credentials"
+                );
+
+                click(visible_text(&outgoing, DeviceTab::PairThisComputer.label()));
+                assert!(tab.get() == DeviceTab::PairThisComputer);
+                let incoming = settled();
+                assert!(text_rect(&incoming, "配对并连接").is_none());
+                assert!(text_rect(&incoming, "设备地址").is_none());
+                visible_text(&incoming, "本机在线");
+                visible_text(&incoming, "手机扫码连接");
+                assert!(
+                    visible_text(&incoming, "手动配对").bottom()
+                        < visible_text(&incoming, "打开本机网页").top()
+                );
+                visible_text(&incoming, "中继设置");
+                visible_text(&incoming, "打开中继网页");
+                click(visible_text(&incoming, DeviceTab::Connect.label()));
+                assert!(tab.get() == DeviceTab::Connect);
+                visible_text(&settled(), "配对并连接");
+            }
+        }
     }
 }
 
