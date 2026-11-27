@@ -4,10 +4,10 @@ use crate::{
     settings,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::MutexGuard;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct PermissionTarget {
     pub session_id: Option<String>,
     pub run_id: Option<String>,

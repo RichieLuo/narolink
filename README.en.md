@@ -2,7 +2,7 @@
 
 [简体中文](README.md) · **English** · [日本語](README.ja.md)
 
-Pick up your Codex, Claude Code, and Antigravity sessions from a computer, phone, or tablet. The Rust desktop app runs the CLI on the host computer, and the Go relay gives remote devices a browser workspace. The desktop app initiates the connection to the relay, so the host needs no inbound ports. Each CLI manages its own session history. The relay forwards requests and responses in memory.
+Pick up your Codex, Claude Code, and Antigravity sessions from a computer, phone, or tablet. Naro runs the CLI on the host computer. Connect from the Naro desktop app on another computer or from the web on a phone or tablet. The host initiates the connection to the Go relay and needs no inbound ports. Each CLI manages its own session history. The relay forwards requests and responses in memory.
 
 ## Get started
 
@@ -52,7 +52,7 @@ naro.example.com {
 
 1. On the host, open **Device connection** (**设备连接**), enter the relay's HTTPS address and connection token, and click **Connect** (**连接**). On Windows, **Save and connect** (**保存并连接**) stores the token in the system credential store for reconnection at launch.
 2. Once the host is online, tap **Scan to connect** (**扫码连接**) in Naro on your phone and point the camera at the computer’s QR code to pair automatically. You can also scan with the phone’s camera app and open the link. Keep the host and Naro running.
-3. You can also expand **Manual pairing** (**手动配对**), open the device address in a browser on another device, and enter the eight-digit pairing code. On another computer, you can paste the address into Naro and click **Connect in browser** (**在浏览器中连接**).
+3. Open **Manual pairing** (**手动配对**) on the host to find its device address and eight-digit pairing code. In Naro on another computer, go to **Device connection → Connect to another device** (**设备连接 → 连接另一台设备**), enter the address and code, and click **Pair and connect** (**配对并连接**). Only the host needs relay setup. Use **Return to this computer** (**返回本机**) to switch back to your own workspace. You can reconnect to the most recently paired computer while Naro stays open. The device address and pairing code also work in a browser.
 4. One relay can serve multiple hosts. To return to a paired host, use **Switch device** (**切换设备**) in the browser sidebar or **Device list** (**设备列表**) on the relay homepage. On iPhone, use **Share → Add to Home Screen** in Safari.
 
 To connect automatically when Naro starts, set `NAROLINK_RELAY_URL` and `NAROLINK_RELAY_TOKEN` on the host. Naro uses the hostname by default. Set `NAROLINK_DEVICE_NAME` to display a different name.

@@ -120,6 +120,7 @@ pub struct UserAttachment {
 pub enum HistoryImage {
     Local(PathBuf),
     Inline(InlineImage),
+    Remote(String),
 }
 
 #[derive(Clone)]
@@ -392,7 +393,7 @@ impl Write for BoundedPng {
     }
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct ImageUpload {
     pub name: String,
     pub data: String,

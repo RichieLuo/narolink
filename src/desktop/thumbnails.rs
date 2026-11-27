@@ -1,9 +1,9 @@
-use super::{Language, style::*};
-use crate::engine::attachments::{HistoryImage, ImageAttachment};
+use super::{Language, remote::RemoteClient, style::*};
+use crate::engine::attachments::{HistoryImage, ImageAttachment, InlineImage};
 use eframe::egui::{self, ColorImage, Rect, TextureHandle, Ui, Vec2, vec2};
 use std::{
     collections::VecDeque,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
 };
 
@@ -17,8 +17,16 @@ pub(super) struct PromptImage<'a> {
 }
 
 pub(super) enum ThumbnailSource<'a> {
-    History(&'a HistoryImage),
+    Local(&'a Path),
+    Inline(&'a InlineImage),
     Sent(ImageAttachment),
+    Remote(&'a RemoteClient, RemoteImage<'a>),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum RemoteImage<'a> {
+    Run(&'a str, usize),
+    Preview(&'a str),
 }
 
 #[derive(PartialEq, Eq)]
@@ -26,14 +34,71 @@ enum ImageKey {
     Local(PathBuf),
     Inline(uuid::Uuid),
     Sent(String),
+    RemoteRun(String, String, usize),
+    RemotePreview(String, String),
 }
 
-impl ThumbnailSource<'_> {
+impl<'a> ThumbnailSource<'a> {
+    pub(super) fn history(
+        image: &'a HistoryImage,
+        client: Option<&'a RemoteClient>,
+    ) -> Option<Self> {
+        match (image, client) {
+            (HistoryImage::Remote(key), Some(client)) => {
+                Some(Self::Remote(client, RemoteImage::Preview(key)))
+            }
+            (HistoryImage::Local(path), None) => Some(Self::Local(path)),
+            (HistoryImage::Inline(image), None) => Some(Self::Inline(image)),
+            _ => None,
+        }
+    }
+
     fn key(&self) -> ImageKey {
         match self {
-            Self::History(HistoryImage::Local(path)) => ImageKey::Local(path.clone()),
-            Self::History(HistoryImage::Inline(image)) => ImageKey::Inline(image.id()),
+            Self::Local(path) => ImageKey::Local(path.to_path_buf()),
+            Self::Inline(image) => ImageKey::Inline(image.id()),
             Self::Sent(image) => ImageKey::Sent(image.id().to_owned()),
+            Self::Remote(client, RemoteImage::Run(id, index)) => {
+                ImageKey::RemoteRun(client.address().to_owned(), (*id).to_owned(), *index)
+            }
+            Self::Remote(client, RemoteImage::Preview(key)) => {
+                ImageKey::RemotePreview(client.address().to_owned(), (*key).to_owned())
+            }
+        }
+    }
+
+    fn load(&self) -> Box<dyn FnOnce() -> Option<ImageAttachment> + Send> {
+        match self {
+            Self::Local(path) => {
+                let path = path.to_path_buf();
+                Box::new(move || {
+                    // Only an explicit image from local conversation history can reach this path.
+                    if !path.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
+                        return None;
+                    }
+                    ImageAttachment::from_file(path).ok()
+                })
+            }
+            Self::Inline(image) => {
+                let image = (*image).clone();
+                Box::new(move || image.decode().ok())
+            }
+            Self::Sent(image) => {
+                let image = image.clone();
+                Box::new(move || Some(image))
+            }
+            Self::Remote(client, RemoteImage::Run(id, index)) => {
+                let (client, id, index) = ((*client).clone(), (*id).to_owned(), *index);
+                Box::new(move || {
+                    ImageAttachment::from_bytes("image", &client.image(&id, index).ok()?).ok()
+                })
+            }
+            Self::Remote(client, RemoteImage::Preview(key)) => {
+                let (client, key) = ((*client).clone(), (*key).to_owned());
+                Box::new(move || {
+                    ImageAttachment::from_bytes("image", &client.preview(&key).ok()?).ok()
+                })
+            }
         }
     }
 }
@@ -271,25 +336,12 @@ fn load_image(
     source: &ThumbnailSource<'_>,
     [width, height]: [u32; 2],
 ) -> Receiver<Option<ColorImage>> {
-    let (history, sent) = match source {
-        ThumbnailSource::History(image) => (Some((*image).clone()), None),
-        ThumbnailSource::Sent(image) => (None, Some(image.clone())),
-    };
+    let load = source.load();
     let ctx = ctx.clone();
     let (outbox, inbox) = mpsc::channel();
     std::thread::spawn(move || {
         let image = (|| {
-            let image = match history {
-                Some(HistoryImage::Local(path)) => {
-                    // Only an explicit image from conversation history can reach this path.
-                    if !path.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
-                        return None;
-                    }
-                    ImageAttachment::from_file(path).ok()?
-                }
-                Some(HistoryImage::Inline(image)) => image.decode().ok()?,
-                None => sent?,
-            };
+            let image = load()?;
             let decoded =
                 image::load_from_memory_with_format(image.png_bytes(), image::ImageFormat::Png)
                     .ok()?;

@@ -164,6 +164,7 @@ impl Previews {
                 format!("inline-{}", image.id().simple()),
                 PreviewSource::Inline(image.clone()),
             )),
+            HistoryImage::Remote(_) => None,
         });
         AttachmentPreview {
             name: attachment.name.clone(),

@@ -120,7 +120,7 @@ struct State {
     finished: Option<Instant>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Running,
@@ -146,7 +146,7 @@ impl SendMode {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct FollowUpRequest {
     pub mode: SendMode,
     pub prompt: String,
@@ -155,7 +155,7 @@ pub struct FollowUpRequest {
     pub images: Vec<attachments::ImageUpload>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Delivery {
     Pending,
@@ -163,7 +163,7 @@ pub enum Delivery {
     Unsent,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FollowUp {
     pub id: String,
     pub mode: SendMode,
@@ -171,6 +171,7 @@ pub struct FollowUp {
     pub prompt: String,
     pub images: Vec<String>,
     #[serde(
+        skip_deserializing,
         skip_serializing_if = "Vec::is_empty",
         serialize_with = "attachments::serialize_local_file_labels"
     )]
@@ -184,19 +185,20 @@ pub struct FollowUp {
     pub error: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Snapshot {
     #[serde(flatten)]
     pub run: RunSummary,
     pub status: Status,
     pub prompt: String,
     pub output: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub draft: String,
     #[serde(skip)]
     pub work: Work,
     pub images: Vec<String>,
     #[serde(
+        skip_deserializing,
         skip_serializing_if = "Vec::is_empty",
         serialize_with = "attachments::serialize_local_file_labels"
     )]
@@ -208,7 +210,7 @@ pub struct Snapshot {
     pub approval: Option<Approval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<QuestionRequest>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub follow_ups: Vec<FollowUp>,
 }
 
@@ -327,7 +329,7 @@ impl Snapshot {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RunSummary {
     pub id: String,
     pub provider: Provider,
@@ -337,20 +339,20 @@ pub struct RunSummary {
     pub model: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Activity {
     pub running: Vec<RunSummary>,
     pub finished: Vec<RunSummary>,
     pub title_revision: u64,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Approval {
     pub id: String,
     pub title: String,
     pub details: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct QuestionRequest {
     pub id: String,
     pub questions: Vec<Question>,

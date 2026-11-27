@@ -1,5 +1,5 @@
-use super::{cut, short};
-use serde::Serialize;
+use super::{attachments::UserAttachment, cut, short};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 const MAX_STEPS: usize = 96;
@@ -8,7 +8,7 @@ const MAX_CHANGED_FILES: usize = 128;
 pub const MAX_STEP_TEXT: usize = 4 * 1024;
 pub const MAX_DIFF_TEXT: usize = 8 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {
     Note,
@@ -33,7 +33,7 @@ impl StepKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     Running,
@@ -42,7 +42,7 @@ pub enum StepStatus {
     Interrupted,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Running,
@@ -52,12 +52,12 @@ pub enum AgentStatus {
     Interrupted,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Agent {
     pub id: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<AgentStatus>,
@@ -79,7 +79,7 @@ impl Agent {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Step {
     pub id: String,
     pub kind: StepKind,
@@ -88,7 +88,7 @@ pub struct Step {
     /// Character offset in the visible reply where this step first appeared.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_offset: Option<usize>,
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i64>,
@@ -108,7 +108,7 @@ impl Step {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FileChange {
     pub path: String,
     pub added: usize,
@@ -117,7 +117,7 @@ pub struct FileChange {
     pub truncated: bool,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ContextUsage {
     pub used: Option<u64>,
     pub limit: Option<u64>,
@@ -136,26 +136,28 @@ impl ContextUsage {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PlanStep {
     pub step: String,
     pub status: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Work {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextUsage>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plan: Vec<PlanStep>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<Agent>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub changes: Vec<FileChange>,
     #[serde(skip)]
     pub images: Vec<PathBuf>,
+    #[serde(skip)]
+    pub remote_previews: Vec<UserAttachment>,
 }
 
 pub enum ReplyPart<'a> {
@@ -213,6 +215,7 @@ impl Work {
             && self.agents.is_empty()
             && self.changes.is_empty()
             && self.images.is_empty()
+            && self.remote_previews.is_empty()
     }
 
     pub fn record_agent(&mut self, agent: Agent) {

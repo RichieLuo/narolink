@@ -4,7 +4,7 @@ mod tests;
 
 use super::Provider;
 use memchr::memmem;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     cmp::Reverse,
@@ -19,7 +19,7 @@ const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const DAY: i64 = 86_400 * NANOS_PER_SECOND;
 const MAX_LINE: u64 = 8 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub enum UsagePeriod {
     #[default]
     #[serde(rename = "24h")]
@@ -50,7 +50,7 @@ impl UsagePeriod {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TokenCounts {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -91,19 +91,19 @@ impl TokenCounts {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UsageReport {
     pub windows: [UsageWindow; 3],
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct UsageWindow {
     pub period: UsagePeriod,
     pub total: Option<TokenCounts>,
     pub providers: [ProviderUsage; 3],
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProviderUsage {
     pub provider: Provider,
     pub counts: Option<TokenCounts>,

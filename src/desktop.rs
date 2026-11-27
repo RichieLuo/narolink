@@ -7,22 +7,25 @@ mod input;
 #[cfg(target_os = "macos")]
 mod macos;
 mod markdown;
+mod remote;
 mod style;
 mod thumbnails;
 mod ui;
+mod workspace;
 
 use crate::{
     engine::{
         self, CodexQuotaResetOutcome, CollaborationMode, Inventory, ModelCatalog, ModelOptions,
-        Project, Provider, Quota, Session, Transcript, TurnRequest,
+        Project, Provider, QuestionAnswers, Quota, Session, Transcript, TurnRequest,
         usage::{UsagePeriod, UsageReport},
     },
-    service::{PermissionTarget, RunSummary, SendMode, Service, Snapshot, Status},
+    service::{Activity, PermissionTarget, RunSummary, SendMode, Service, Snapshot, Status},
     settings::STATE_APP_ID,
     web::Gateway,
 };
 use eframe::egui;
 use i18n::Language;
+use remote::RemoteClient;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -31,6 +34,7 @@ use std::{
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
+use workspace::Workspace;
 
 pub fn run(service: Service, gateway: Gateway) -> eframe::Result {
     let logo = image::load_from_memory(include_bytes!("../public/icons/192.png"))
@@ -100,19 +104,28 @@ enum Update {
     Inventory(u64, Provider, Result<Inventory, String>),
     Models(u64, Provider, Result<ModelCatalog, String>),
     Quota(Provider, Result<Quota, String>),
-    TokenUsage(UsageReport),
+    TokenUsage(Result<UsageReport, String>),
     CodexQuotaReset(Result<CodexQuotaResetOutcome, String>),
     Transcript(u64, Result<(Session, Transcript), String>, bool),
     Submitted(u64, String, Result<Option<RunSummary>, String>),
     NativeAction(NativeRequest, Result<serde_json::Value, String>),
     NativeSearch(u64, Result<serde_json::Value, String>),
+    Connected(Result<RemoteClient, String>),
+    Activity(Result<Activity, String>),
+    Snapshot(u64, String, Result<Option<Snapshot>, String>),
+    Permission(u64, Result<Option<String>, String>),
+    RunCommand(String, RunCommand, Result<Option<ComposerDraft>, String>),
 }
 
 struct Desktop {
     service: Service,
+    remote: Option<RemoteClient>,
+    local_view: Option<SavedView>,
+    recent_device: Option<(RemoteClient, SavedView)>,
+    workspace_epoch: u64,
     gateway: Gateway,
-    inbox: Receiver<Update>,
-    outbox: Sender<Update>,
+    inbox: Receiver<(u64, Update)>,
+    outbox: Sender<(u64, Update)>,
     inventories: HashMap<Provider, Result<Inventory, String>>,
     models: HashMap<Provider, ModelCatalog>,
     model_errors: HashMap<Provider, String>,
@@ -121,6 +134,15 @@ struct Desktop {
     catalog_epoch: u64,
     running: Vec<RunSummary>,
     last_runs: Instant,
+    activity_pending: bool,
+    last_snapshot: Instant,
+    snapshot_pending: bool,
+    snapshot_serial: u64,
+    remote_error: Option<String>,
+    snapshot_error: Option<String>,
+    run_command_pending: bool,
+    permission_pending: bool,
+    permission_serial: u64,
     recent_run: Option<String>,
     title_revision: u64,
     view: View,
@@ -147,10 +169,13 @@ struct Desktop {
     quota_pending: HashSet<Provider>,
     quotas: HashMap<Provider, Result<Quota, String>>,
     token_usage: Option<UsageReport>,
+    token_usage_error: Option<String>,
     token_usage_pending: bool,
     token_period: UsagePeriod,
     codex_quota_reset: CodexQuotaReset,
     target_device_url: String,
+    target_device_code: String,
+    target_device_pending: bool,
     target_device_error: Option<String>,
     relay_url: String,
     relay_token: String,
@@ -163,6 +188,26 @@ struct Desktop {
     attachment_picker: Option<(egui::Id, egui_file_dialog::FileDialog)>,
     thumbnails: thumbnails::Thumbnails,
     brand: egui::TextureHandle,
+}
+
+struct SavedView {
+    view: View,
+    folder: PathBuf,
+    model_preferences: HashMap<Provider, ModelSelection>,
+}
+
+enum RunCommand {
+    Stop,
+    Approve {
+        approval_id: String,
+        allow: bool,
+    },
+    Answer {
+        question_id: String,
+        answers: QuestionAnswers,
+    },
+    Steer(String),
+    Withdraw(String),
 }
 
 #[derive(Default)]
@@ -433,6 +478,10 @@ impl Desktop {
         clipboard.set_context(cc.egui_ctx.clone());
         let mut app = Self {
             service,
+            remote: None,
+            local_view: None,
+            recent_device: None,
+            workspace_epoch: 0,
             gateway,
             inbox,
             outbox,
@@ -444,6 +493,15 @@ impl Desktop {
             catalog_epoch: 0,
             running: Vec::new(),
             last_runs: Instant::now(),
+            activity_pending: false,
+            last_snapshot: Instant::now(),
+            snapshot_pending: false,
+            snapshot_serial: 0,
+            remote_error: None,
+            snapshot_error: None,
+            run_command_pending: false,
+            permission_pending: false,
+            permission_serial: 0,
             recent_run: None,
             title_revision: 0,
             view: View::new(Provider::Codex),
@@ -488,10 +546,13 @@ impl Desktop {
             quota_pending: HashSet::new(),
             quotas: HashMap::new(),
             token_usage: None,
+            token_usage_error: None,
             token_usage_pending: false,
             token_period: UsagePeriod::default(),
             codex_quota_reset: CodexQuotaReset::default(),
             target_device_url: String::new(),
+            target_device_code: String::new(),
+            target_device_pending: false,
             target_device_error: None,
             relay_url,
             relay_token: String::new(),
@@ -507,18 +568,138 @@ impl Desktop {
         };
         app.appearance.apply(&cc.egui_ctx);
         app.restore_model_preference();
-        app.restore_permission_mode();
+        app.restore_permission_mode(&cc.egui_ctx);
         app
     }
 
-    fn background(&self, ctx: &egui::Context, f: impl FnOnce(Service) -> Update + Send + 'static) {
+    fn workspace(&self) -> Workspace {
+        match &self.remote {
+            Some(remote) => Workspace::Remote(remote.clone()),
+            None => Workspace::Local(self.service.clone()),
+        }
+    }
+
+    fn background(
+        &self,
+        ctx: &egui::Context,
+        f: impl FnOnce(Workspace) -> Update + Send + 'static,
+    ) {
         let outbox = self.outbox.clone();
         let ctx = ctx.clone();
-        let service = self.service.clone();
+        let workspace = self.workspace();
+        let epoch = self.workspace_epoch;
         std::thread::spawn(move || {
-            let _ = outbox.send(f(service));
+            let _ = outbox.send((epoch, f(workspace)));
             ctx.request_repaint();
         });
+    }
+
+    fn connect_device(&mut self, ctx: &egui::Context) {
+        if !self.can_switch_workspace() {
+            return;
+        }
+        self.target_device_pending = true;
+        self.target_device_error = None;
+        let address = self.target_device_url.clone();
+        let code = std::mem::take(&mut self.target_device_code);
+        self.background(ctx, move |_| {
+            Update::Connected(RemoteClient::connect(&address, &code))
+        });
+    }
+
+    fn return_to_local(&mut self, ctx: &egui::Context) {
+        if !self.can_switch_workspace() {
+            return;
+        }
+        if let Some(saved) = self.local_view.take()
+            && let Some(remote) = self.remote.take()
+        {
+            self.recent_device = Some((remote, self.replace_view(saved)));
+            self.reload_workspace(ctx);
+        }
+    }
+
+    fn can_switch_workspace(&self) -> bool {
+        !self.target_device_pending
+            && !self.view.pending
+            && !self.run_command_pending
+            && self.action_pending.is_empty()
+            && !self.codex_quota_reset.pending
+    }
+
+    fn can_navigate_in_workspace(&self) -> bool {
+        self.remote.is_none() || (!self.view.pending && !self.run_command_pending)
+    }
+
+    fn reopen_device(&mut self, ctx: &egui::Context) {
+        if self.can_switch_workspace()
+            && let Some((remote, saved)) = self.recent_device.take()
+        {
+            self.open_device(ctx, remote, saved);
+        }
+    }
+
+    fn open_device(&mut self, ctx: &egui::Context, remote: RemoteClient, saved: SavedView) {
+        self.local_view = Some(self.replace_view(saved));
+        self.remote = Some(remote);
+        self.reload_workspace(ctx);
+    }
+
+    fn replace_view(&mut self, saved: SavedView) -> SavedView {
+        SavedView {
+            view: std::mem::replace(&mut self.view, saved.view),
+            folder: std::mem::replace(&mut self.folder, saved.folder),
+            model_preferences: std::mem::replace(
+                &mut self.model_preferences,
+                saved.model_preferences,
+            ),
+        }
+    }
+
+    fn reload_workspace(&mut self, ctx: &egui::Context) {
+        self.workspace_epoch += 1;
+        self.catalog_epoch += 1;
+        self.begin_navigation();
+        self.inventories.clear();
+        self.models.clear();
+        self.model_errors.clear();
+        self.inventory_pending.clear();
+        self.model_pending.clear();
+        self.running.clear();
+        self.recent_run = None;
+        self.title_revision = 0;
+        self.activity_pending = false;
+        self.last_runs = Instant::now() - Duration::from_secs(2);
+        self.remote_error = None;
+        self.run_command_pending = false;
+        self.filters = None;
+        self.search.clear();
+        self.native_search = NativeSearch::default();
+        self.action_dialog = None;
+        self.action_pending.clear();
+        self.quota_dialog = false;
+        self.quotas.clear();
+        self.quota_pending.clear();
+        self.token_usage = None;
+        self.token_usage_error = None;
+        self.token_usage_pending = false;
+        self.codex_quota_reset = CodexQuotaReset::default();
+        self.pair_dialog = false;
+        self.pairing_qr = None;
+        self.files = files::FileViewer::default();
+        self.thumbnails = thumbnails::Thumbnails::default();
+        self.markdown = egui_commonmark::CommonMarkCache::default();
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.attachment_picker = None;
+        }
+        self.note = None;
+        self.restore_permission_mode(ctx);
+        self.refresh_inventory(ctx, false);
+        self.load_models(ctx, self.view.provider, false);
+        if self.view.run.is_none() {
+            self.read_history(ctx, self.view.snapshot.is_some());
+        }
     }
 
     fn refresh_inventory(&mut self, ctx: &egui::Context, force: bool) {
@@ -558,8 +739,8 @@ impl Desktop {
             return;
         }
         if self.quota_pending.insert(provider) {
-            self.background(ctx, move |_| {
-                Update::Quota(provider, engine::quota(provider))
+            self.background(ctx, move |workspace| {
+                Update::Quota(provider, workspace.quota(provider))
             });
         }
     }
@@ -569,6 +750,7 @@ impl Desktop {
             return;
         }
         self.token_usage_pending = true;
+        self.token_usage_error = None;
         self.background(ctx, |service| Update::TokenUsage(service.token_usage()));
     }
 
@@ -579,8 +761,8 @@ impl Desktop {
         {
             reset.pending = true;
             reset.error = None;
-            self.background(ctx, move |_| {
-                Update::CodexQuotaReset(engine::reset_codex_quota(id))
+            self.background(ctx, move |workspace| {
+                Update::CodexQuotaReset(workspace.reset_codex_quota(id))
             });
         }
     }
@@ -604,6 +786,8 @@ impl Desktop {
         page.proxy_result = Some(result);
         if saved {
             self.service.invalidate_cli_catalogs();
+        }
+        if saved && self.remote.is_none() {
             self.catalog_epoch += 1;
             self.inventory_pending.clear();
             self.model_pending.clear();
@@ -639,17 +823,61 @@ impl Desktop {
         }
     }
 
-    fn restore_permission_mode(&mut self) {
-        match self
-            .service
-            .permission_mode(self.view.provider, &self.view.permission_target())
-        {
+    fn restore_permission_mode(&mut self, ctx: &egui::Context) {
+        self.permission_serial += 1;
+        let serial = self.permission_serial;
+        let provider = self.view.provider;
+        let target = self.view.permission_target();
+        self.view.permission_mode = None;
+        if self.remote.is_some() {
+            self.permission_pending = true;
+            self.background(ctx, move |workspace| {
+                Update::Permission(serial, workspace.permission_mode(provider, &target))
+            });
+        } else {
+            self.finish_permission(self.service.permission_mode(provider, &target));
+        }
+    }
+
+    fn save_permission_mode(&mut self, ctx: &egui::Context, mode: Option<String>) {
+        self.permission_serial += 1;
+        let serial = self.permission_serial;
+        let provider = self.view.provider;
+        let target = self.view.permission_target();
+        if self.remote.is_some() {
+            self.permission_pending = true;
+            self.background(ctx, move |workspace| {
+                let result = workspace.save_permission_mode(provider, &target, mode.as_deref());
+                Update::Permission(serial, result.map(|()| mode))
+            });
+        } else {
+            let result = self
+                .service
+                .save_permission_mode(provider, &target, mode.as_deref());
+            self.finish_permission(result.map(|()| mode));
+        }
+    }
+
+    fn finish_permission(&mut self, result: Result<Option<String>, String>) {
+        self.permission_pending = false;
+        match result {
             Ok(mode) => self.view.permission_mode = mode,
             Err(problem) => {
-                self.view.permission_mode = None;
                 self.note = Some(problem);
             }
         }
+    }
+
+    fn reset_snapshot_poll(&mut self) {
+        self.snapshot_serial += 1;
+        self.snapshot_pending = false;
+        self.last_snapshot = Instant::now() - Duration::from_secs(1);
+    }
+
+    fn begin_navigation(&mut self) {
+        self.epoch += 1;
+        self.snapshot_error = None;
+        self.reset_snapshot_poll();
     }
 
     fn new_view(
@@ -658,6 +886,9 @@ impl Desktop {
         folder: Option<PathBuf>,
         project_id: Option<String>,
     ) {
+        if !self.can_navigate_in_workspace() {
+            return;
+        }
         let provider = if project_id.is_some() {
             Provider::Codex
         } else if folder.is_some() {
@@ -668,17 +899,20 @@ impl Desktop {
         if let Some(folder) = folder {
             self.folder = folder;
         }
-        self.epoch += 1;
+        self.begin_navigation();
         self.view = View::new(provider);
         self.restore_model_preference();
         self.view.project_id = project_id;
         self.note = None;
-        self.restore_permission_mode();
+        self.restore_permission_mode(ctx);
         self.load_models(ctx, self.view.provider, false);
     }
 
     fn open(&mut self, ctx: &egui::Context, session: Session) {
-        self.epoch += 1;
+        if !self.can_navigate_in_workspace() {
+            return;
+        }
+        self.begin_navigation();
         self.note = None;
         self.view = View::new(session.provider);
         self.view.id = Some(session.id.clone());
@@ -690,21 +924,24 @@ impl Desktop {
             self.view.run_model.clone_from(&run.model);
         }
         self.view.session = Some(session);
-        self.restore_permission_mode();
+        self.restore_permission_mode(ctx);
         self.view.transcript.warning = Some("正在读取原会话…".into());
         self.load_models(ctx, self.view.provider, false);
         self.read_history(ctx, false);
     }
 
     fn open_run(&mut self, ctx: &egui::Context, run: RunSummary) {
-        self.epoch += 1;
+        if !self.can_navigate_in_workspace() {
+            return;
+        }
+        self.begin_navigation();
         self.note = None;
         self.view = View::new(run.provider);
         self.view.run = Some(run.id);
         self.view.run_model = run.model;
         self.view.title = Some(run.title);
         self.view.id = run.session_id;
-        self.restore_permission_mode();
+        self.restore_permission_mode(ctx);
         self.load_models(ctx, self.view.provider, false);
         self.read_history(ctx, false);
     }
@@ -714,12 +951,8 @@ impl Desktop {
             let provider = self.view.provider;
             let id = id.clone();
             let epoch = self.epoch;
-            self.background(ctx, move |service| {
-                let result = service.session(provider, &id).and_then(|session| {
-                    let history = service.transcript(&session, refresh)?;
-                    Ok((session, history))
-                });
-                Update::Transcript(epoch, result, refresh)
+            self.background(ctx, move |workspace| {
+                Update::Transcript(epoch, workspace.history(provider, &id, refresh), refresh)
             });
         }
     }
@@ -739,7 +972,10 @@ impl Desktop {
                 })
                 && path.is_file()
         });
-        for path in references {
+        if self.remote.is_some() && !references.is_empty() {
+            self.note = Some("远程会话支持从本机发送图片。".into());
+        }
+        for path in references.into_iter().filter(|_| self.remote.is_none()) {
             let directory = path.is_dir();
             let Ok(path) = path.into_os_string().into_string() else {
                 self.note = Some("附件路径包含无法显示的字符。".into());
@@ -796,7 +1032,13 @@ impl Desktop {
     }
 
     fn submit(&mut self, ctx: &egui::Context) {
-        if self.view.pending || self.view.stopping || self.native_pending() || !self.view.has_draft() {
+        if self.view.pending
+            || self.view.stopping
+            || self.permission_pending
+            || self.run_command_pending
+            || self.native_pending()
+            || !self.view.has_draft()
+        {
             return;
         }
         let draft = std::mem::take(&mut self.view.draft);
@@ -864,25 +1106,83 @@ impl Desktop {
         } else {
             SendMode::Queue
         };
-        self.background(ctx, move |service| {
-            let result = if let Some(id) = run {
-                service
-                    .run(&id)
-                    .and_then(|run| {
-                        run.follow_up_with_attachments(
-                            mode,
-                            request.prompt,
-                            images,
-                            request.local_files,
-                            Some(request.options),
-                        )
-                    })
-                    .map(|()| None)
-            } else {
-                service.start_with_images(request, images).map(Some)
-            };
-            Update::Submitted(epoch, draft, result)
+        self.background(ctx, move |workspace| {
+            Update::Submitted(
+                epoch,
+                draft,
+                workspace.submit(run.as_deref(), mode, request, images),
+            )
         });
+    }
+
+    fn run_command(&mut self, ctx: &egui::Context, id: String, command: RunCommand) {
+        if self.run_command_pending {
+            return;
+        }
+        if matches!(command, RunCommand::Stop) {
+            self.view.stopping = true;
+        }
+        if self.remote.is_some() {
+            self.run_command_pending = true;
+            self.reset_snapshot_poll();
+            self.background(ctx, move |workspace| {
+                let result = workspace.run_command(&id, &command);
+                Update::RunCommand(id, command, result)
+            });
+        } else {
+            let result = self.workspace().run_command(&id, &command);
+            self.finish_run_command(ctx, &id, command, result);
+        }
+    }
+
+    fn finish_run_command(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        command: RunCommand,
+        result: Result<Option<ComposerDraft>, String>,
+    ) {
+        self.run_command_pending = false;
+        let same_run =
+            self.view.run.as_deref() == Some(id) || self.view.last_finished.as_deref() == Some(id);
+        if !same_run {
+            return;
+        }
+        self.last_snapshot = Instant::now() - Duration::from_secs(1);
+        match result {
+            Ok(draft) => {
+                if let Some(draft) = draft {
+                    self.view.show_draft(draft);
+                    if let Some(editor) = self.composer_focus {
+                        ctx.memory_mut(|memory| memory.request_focus(editor));
+                    }
+                }
+                if let RunCommand::Answer { question_id, .. } = command
+                    && let Some(snapshot) = &mut self.view.snapshot
+                    && snapshot
+                        .question
+                        .as_ref()
+                        .is_some_and(|request| request.id == question_id)
+                {
+                    self.view.question_form = None;
+                    snapshot.question = None;
+                }
+            }
+            Err(problem) => match command {
+                RunCommand::Stop => {
+                    self.view.stopping = false;
+                    self.note = Some(problem);
+                }
+                RunCommand::Answer { question_id, .. } => {
+                    if let Some(form) = &mut self.view.question_form
+                        && form.id == question_id
+                    {
+                        form.error = Some(problem);
+                    }
+                }
+                _ => self.note = Some(problem),
+            },
+        }
     }
 
     fn native_pending(&self) -> bool {
@@ -1026,8 +1326,74 @@ impl Desktop {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
-        while let Ok(event) = self.inbox.try_recv() {
+        while let Ok((workspace, event)) = self.inbox.try_recv() {
+            if workspace != self.workspace_epoch {
+                continue;
+            }
             match event {
+                Update::Connected(result) => {
+                    self.target_device_pending = false;
+                    match result {
+                        Ok(remote) => {
+                            self.target_device_url = remote.address().to_string();
+                            let saved = SavedView {
+                                view: View::new(Provider::Codex),
+                                folder: PathBuf::new(),
+                                model_preferences: HashMap::new(),
+                            };
+                            if self.can_switch_workspace() {
+                                self.recent_device = None;
+                                self.open_device(ctx, remote, saved);
+                            } else {
+                                self.recent_device = Some((remote, saved));
+                            }
+                        }
+                        Err(error) => self.target_device_error = Some(error),
+                    }
+                }
+                Update::Activity(result) => {
+                    self.activity_pending = false;
+                    match result {
+                        Ok(activity) => {
+                            if self.remote_error.take().is_some() {
+                                self.refresh_inventory(ctx, false);
+                                self.load_models(ctx, self.view.provider, false);
+                                if self.view.run.is_none() {
+                                    self.read_history(ctx, false);
+                                }
+                            }
+                            self.apply_activity(ctx, activity);
+                        }
+                        Err(error) => self.remote_error = Some(error),
+                    }
+                }
+                Update::Snapshot(serial, id, result) if serial == self.snapshot_serial => {
+                    self.snapshot_pending = false;
+                    if self.view.run.as_deref() == Some(&id) {
+                        match result {
+                            Ok(Some(snapshot)) => {
+                                self.snapshot_error = None;
+                                self.apply_snapshot(ctx, &id, snapshot);
+                            }
+                            Ok(None) => {
+                                self.snapshot_error = None;
+                                self.view.last_finished = Some(id);
+                                self.view.run = None;
+                                self.view.run_model = None;
+                                self.view.snapshot = None;
+                                self.view.stopping = false;
+                                self.read_history(ctx, true);
+                            }
+                            Err(error) => self.snapshot_error = Some(error),
+                        }
+                    }
+                }
+                Update::Permission(serial, result) if serial == self.permission_serial => {
+                    self.finish_permission(result);
+                }
+                Update::RunCommand(id, command, result) => {
+                    self.finish_run_command(ctx, &id, command, result);
+                }
                 Update::Inventory(epoch, provider, result) if epoch == self.catalog_epoch => {
                     self.inventory_pending.remove(&provider);
                     if self.view.provider == provider
@@ -1068,8 +1434,11 @@ impl Desktop {
                 }
                 Update::NativeAction(request, result) => self.finish_native_action(ctx, request, result),
                 Update::TokenUsage(report) => {
-                    self.token_usage = Some(report);
                     self.token_usage_pending = false;
+                    match report {
+                        Ok(report) => self.token_usage = Some(report),
+                        Err(error) => self.token_usage_error = Some(error),
+                    }
                 }
                 Update::CodexQuotaReset(result) => {
                     let reset = &mut self.codex_quota_reset;
@@ -1115,6 +1484,7 @@ impl Desktop {
                                 self.view.run = Some(run.id);
                                 self.view.run_model = run.model;
                                 self.view.snapshot = None;
+                                self.reset_snapshot_poll();
                             }
                             self.view.attachments.clear();
                             self.view.local_files.clear();
@@ -1139,64 +1509,44 @@ impl Desktop {
                 _ => {}
             }
         }
-        if self.last_runs.elapsed() >= Duration::from_millis(400) {
-            let activity = self.service.activity();
-            self.running = activity.running;
+        let remote = self.remote.is_some();
+        let activity_interval = if remote { 1_500 } else { 400 };
+        if !self.activity_pending
+            && self.last_runs.elapsed() >= Duration::from_millis(activity_interval)
+        {
             self.last_runs = Instant::now();
-            let latest = activity.finished.first().map(|run| run.id.clone());
-            if self.inventory_pending.is_empty()
-                && ((latest.is_some() && self.recent_run != latest)
-                    || self.title_revision != activity.title_revision)
-            {
-                self.recent_run = latest;
-                self.title_revision = activity.title_revision;
-                self.refresh_inventory(ctx, false);
-            }
-            if !self.view.busy()
-                && let Some(id) = &self.view.id
-            {
-                let matches = |run: &&RunSummary| {
-                    run.provider == self.view.provider && run.session_id.as_ref() == Some(id)
-                };
-                if let Some(run) = self.running.iter().find(matches) {
-                    self.view.run = Some(run.id.clone());
-                    self.view.run_model.clone_from(&run.model);
-                } else if let Some(run) = activity.finished.iter().find(matches)
-                    && self.view.last_finished.as_ref() != Some(&run.id)
-                {
-                    self.view.last_finished = Some(run.id.clone());
-                    self.read_history(ctx, true);
-                }
+            if let Some(remote) = self.remote.clone() {
+                self.activity_pending = true;
+                self.background(ctx, move |_| Update::Activity(remote.activity()));
+            } else {
+                self.apply_activity(ctx, self.service.activity());
             }
         }
-        if let Some(id) = &self.view.run {
-            match self.service.run(id) {
-                Ok(run) => {
-                    let snapshot = run.snapshot();
-                    self.view.context_report = None;
-                    if self.view.id.is_none() {
-                        self.view.id.clone_from(&snapshot.run.session_id);
-                    }
-                    if snapshot.run.model.is_some() {
-                        self.view.run_model.clone_from(&snapshot.run.model);
-                    }
-                    self.view.title = Some(snapshot.run.title.clone());
-                    let finished = snapshot.status != Status::Running;
-                    self.view.snapshot = Some(snapshot);
-                    if finished {
-                        self.view.last_finished = Some(id.clone());
-                        self.view.run = None;
-                        self.view.stopping = false;
-                        self.running = self.service.running();
-                        self.read_history(ctx, true);
-                        self.refresh_inventory(ctx, false);
-                    }
+        if let Some(id) = self.view.run.clone() {
+            if let Some(remote) = self.remote.clone() {
+                if !self.snapshot_pending
+                    && !self.run_command_pending
+                    && self.last_snapshot.elapsed() >= Duration::from_millis(600)
+                {
+                    self.last_snapshot = Instant::now();
+                    self.snapshot_pending = true;
+                    let serial = self.snapshot_serial;
+                    self.background(ctx, move |_| {
+                        let result = remote.snapshot(&id);
+                        Update::Snapshot(serial, id, result)
+                    });
                 }
-                Err(problem) => {
-                    self.view.run = None;
-                    self.view.run_model = None;
-                    self.view.stopping = false;
-                    self.note = Some(problem);
+            } else {
+                match self.service.run(&id) {
+                    Ok(run) => {
+                        self.apply_snapshot(ctx, &id, run.snapshot());
+                    }
+                    Err(problem) => {
+                        self.view.run = None;
+                        self.view.run_model = None;
+                        self.view.stopping = false;
+                        self.note = Some(problem);
+                    }
                 }
             }
         }
@@ -1206,6 +1556,63 @@ impl Desktop {
             400
         };
         ctx.request_repaint_after(Duration::from_millis(interval));
+    }
+
+    fn apply_activity(&mut self, ctx: &egui::Context, activity: Activity) {
+        self.running = activity.running;
+        let latest = activity.finished.first().map(|run| run.id.clone());
+        if self.inventory_pending.is_empty()
+            && ((latest.is_some() && self.recent_run != latest)
+                || self.title_revision != activity.title_revision)
+        {
+            self.recent_run = latest;
+            self.title_revision = activity.title_revision;
+            self.refresh_inventory(ctx, false);
+        }
+        if !self.view.busy()
+            && let Some(id) = &self.view.id
+        {
+            let matches = |run: &&RunSummary| {
+                run.provider == self.view.provider && run.session_id.as_ref() == Some(id)
+            };
+            if let Some(run) = self.running.iter().find(matches)
+                && self.view.last_finished.as_deref() != Some(&run.id)
+            {
+                self.view.run = Some(run.id.clone());
+                self.view.run_model.clone_from(&run.model);
+            } else if let Some(run) = activity.finished.iter().find(matches)
+                && self.view.last_finished.as_ref() != Some(&run.id)
+            {
+                self.view.last_finished = Some(run.id.clone());
+                self.read_history(ctx, true);
+            }
+        }
+    }
+
+    fn apply_snapshot(&mut self, ctx: &egui::Context, id: &str, snapshot: Snapshot) {
+        self.view.context_report = None;
+        if self.view.id.is_none() {
+            self.view.id.clone_from(&snapshot.run.session_id);
+        }
+        if snapshot.run.model.is_some() {
+            self.view.run_model.clone_from(&snapshot.run.model);
+        }
+        self.view.title = Some(snapshot.run.title.clone());
+        let finished = snapshot.status != Status::Running;
+        self.view.snapshot = Some(snapshot);
+        if finished {
+            self.view.last_finished = Some(id.to_owned());
+            self.view.run = None;
+            self.view.stopping = false;
+            if self.remote.is_some() {
+                self.running.retain(|run| run.id != id);
+                self.last_runs = Instant::now() - Duration::from_secs(2);
+            } else {
+                self.running = self.service.running();
+            }
+            self.read_history(ctx, true);
+            self.refresh_inventory(ctx, false);
+        }
     }
 }
 
@@ -1225,8 +1632,12 @@ impl eframe::App for Desktop {
         storage.set_string("language", self.language.code().to_owned());
         storage.set_string("appearance", self.appearance.code().to_owned());
         eframe::set_value(storage, "send_mode", &self.send_mode);
-        eframe::set_value(storage, "model_preferences", &self.model_preferences);
-        if let Some(path) = self.folder.to_str() {
+        let (preferences, folder) = match &self.local_view {
+            Some(local) => (&local.model_preferences, &local.folder),
+            None => (&self.model_preferences, &self.folder),
+        };
+        eframe::set_value(storage, "model_preferences", preferences);
+        if let Some(path) = folder.to_str() {
             storage.set_string("folder", path.to_owned());
         }
     }

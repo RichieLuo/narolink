@@ -1,7 +1,7 @@
 //! Native session controls. This is an allowlist, not an arbitrary RPC proxy.
 use super::*;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum SessionAction {
     Rename {

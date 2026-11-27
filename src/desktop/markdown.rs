@@ -7,6 +7,7 @@ use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_extras::syntax_highlighting::{self, CodeTheme};
 use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
     collections::BTreeMap,
     fmt::Write,
@@ -25,6 +26,37 @@ pub(super) fn render(
     text: &str,
     cwd: &Path,
 ) -> Option<PathBuf> {
+    render_markdown(ui, cache, text, Some(cwd))
+}
+
+pub(super) fn render_remote(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
+    render_markdown(ui, cache, text, None);
+}
+
+fn parser_options() -> Options {
+    // Match the viewer's parser options so source ranges retain their meaning.
+    Options::ENABLE_TABLES
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_DEFINITION_LIST
+}
+
+fn web_link(target: &str) -> bool {
+    Url::parse(target).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.has_host()
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
+}
+
+fn render_markdown(
+    ui: &mut Ui,
+    cache: &mut CommonMarkCache,
+    text: &str,
+    cwd: Option<&Path>,
+) -> Option<PathBuf> {
     let palette = Palette::of(ui);
     cache.link_hooks_clear();
     let mut local_files = Vec::new();
@@ -32,31 +64,20 @@ pub(super) fn render(
     let mut blocks = Vec::new();
     let mut code: Option<(Range<usize>, CodeBlock)> = None;
     let mut table: Option<TableBlock<'_>> = None;
-    // Match the viewer's parser options so source ranges retain their meaning.
-    let options = Options::ENABLE_TABLES
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_DEFINITION_LIST;
-    for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+    for (event, range) in Parser::new_ext(text, parser_options()).into_offset_iter() {
         match event {
             Event::Start(Tag::Link { id, dest_url, .. }) => {
                 if let Some(table) = &mut table {
                     table.add_reference(id, &dest_url);
                 }
-                if Url::parse(&dest_url).is_ok_and(|url| {
-                    matches!(url.scheme(), "http" | "https")
-                        && url.has_host()
-                        && url.username().is_empty()
-                        && url.password().is_none()
-                }) {
+                if web_link(&dest_url) {
                     continue;
                 }
                 cache.add_link_hook(dest_url.as_ref());
                 if table.is_some() {
                     table_cache.add_link_hook(dest_url.as_ref());
                 }
-                if let Some(path) = local_file(&dest_url, cwd) {
+                if let Some(path) = cwd.and_then(|cwd| local_file(&dest_url, cwd)) {
                     local_files.push((dest_url, path));
                 }
             }
@@ -110,8 +131,9 @@ pub(super) fn render(
         ui.visuals_mut().code_bg_color = palette.soft;
         ui.style_mut().url_in_tooltip = true;
         let viewer = CommonMarkViewer::new().explicit_image_uri_scheme(true);
+        let remote = cwd.is_none();
         if blocks.is_empty() {
-            viewer.show(ui, cache, text);
+            show_markdown(ui, cache, text, viewer, remote);
         } else {
             // Use the viewer's block callback so lists, quotes and reference links
             // still belong to one Markdown document.
@@ -122,54 +144,55 @@ pub(super) fn render(
                 .iter()
                 .map(|(target, _)| target.to_string())
                 .collect::<Vec<_>>();
-            viewer
-                .render_html_fn(Some(&move |ui, html| {
-                    let slot = html
-                        .trim()
-                        .strip_prefix(&marker)
-                        .and_then(|html| html.strip_suffix(" -->"))
-                        .and_then(|index| index.parse::<usize>().ok());
-                    if let Some((index, (_, block))) =
-                        slot.and_then(|index| blocks.get(index).map(|block| (index, block)))
-                    {
-                        if ui.cursor().left() > ui.max_rect().left() {
-                            ui.end_row();
-                            ui.set_row_height(0.);
-                        }
-                        ui.scope_builder(
-                            egui::UiBuilder::new()
-                                .id_salt(("markdown block", index))
-                                .layout(Layout::top_down(Align::Min)),
-                            |ui| match block {
-                                Block::Code(code) => render_code_block(ui, code),
-                                Block::Table(source) => {
-                                    let mut cache = table_cache.borrow_mut();
-                                    // A wide grid can expand egui's parent layout. Contain that
-                                    // width so prose and the chat scrollbar stay in the viewport.
-                                    egui::ScrollArea::horizontal().min_scrolled_width(0.).show(
-                                        ui,
-                                        |ui| {
-                                            CommonMarkViewer::new()
-                                                .explicit_image_uri_scheme(true)
-                                                .show(ui, &mut cache, source);
-                                        },
-                                    );
-                                    if let Some(index) = targets.iter().position(|target| {
-                                        cache.get_link_hook(target) == Some(true)
-                                    }) {
-                                        table_link.set(Some(index));
-                                    }
-                                }
-                            },
-                        );
+            let show_block = move |ui: &mut Ui, html: &str| {
+                let slot = html
+                    .trim()
+                    .strip_prefix(&marker)
+                    .and_then(|html| html.strip_suffix(" -->"))
+                    .and_then(|index| index.parse::<usize>().ok());
+                if let Some((index, (_, block))) =
+                    slot.and_then(|index| blocks.get(index).map(|block| (index, block)))
+                {
+                    if ui.cursor().left() > ui.max_rect().left() {
                         ui.end_row();
-                        // A wrapped row inherits the height of the previous widget.
                         ui.set_row_height(0.);
-                    } else {
-                        ui.label(html);
                     }
-                }))
-                .show(ui, cache, &markdown);
+                    ui.scope_builder(
+                        egui::UiBuilder::new()
+                            .id_salt(("markdown block", index))
+                            .layout(Layout::top_down(Align::Min)),
+                        |ui| match block {
+                            Block::Code(code) => render_code_block(ui, code),
+                            Block::Table(source) => {
+                                let mut cache = table_cache.borrow_mut();
+                                // A wide grid can expand egui's parent layout. Contain that
+                                // width so prose and the chat scrollbar stay in the viewport.
+                                egui::ScrollArea::horizontal().min_scrolled_width(0.).show(
+                                    ui,
+                                    |ui| {
+                                        let viewer =
+                                            CommonMarkViewer::new().explicit_image_uri_scheme(true);
+                                        show_markdown(ui, &mut cache, source, viewer, remote);
+                                    },
+                                );
+                                if let Some(index) = targets
+                                    .iter()
+                                    .position(|target| cache.get_link_hook(target) == Some(true))
+                                {
+                                    table_link.set(Some(index));
+                                }
+                            }
+                        },
+                    );
+                    ui.end_row();
+                    // A wrapped row inherits the height of the previous widget.
+                    ui.set_row_height(0.);
+                } else {
+                    ui.label(html);
+                }
+            };
+            let viewer = viewer.render_html_fn(Some(&show_block));
+            show_markdown(ui, cache, &markdown, viewer, remote);
         }
     });
     local_files
@@ -179,6 +202,73 @@ pub(super) fn render(
             table_link.get() == Some(*index) || cache.get_link_hook(target) == Some(true)
         })
         .map(|(_, (_, path))| path)
+}
+
+fn show_markdown(
+    ui: &mut Ui,
+    cache: &mut CommonMarkCache,
+    source: &str,
+    viewer: CommonMarkViewer<'_>,
+    remote: bool,
+) {
+    if !remote {
+        viewer.show(ui, cache, source);
+        return;
+    }
+    let text = image_alt_text(source, cache);
+    // Rewriting alt text can change how neighboring Markdown is parsed.
+    if let Cow::Owned(text) = &text {
+        for event in Parser::new_ext(text, parser_options()) {
+            match event {
+                Event::Start(Tag::Image { .. }) => {
+                    ui.label(text);
+                    return;
+                }
+                Event::Start(Tag::Link { dest_url, .. }) if !web_link(&dest_url) => {
+                    cache.add_link_hook(dest_url.as_ref());
+                }
+                _ => {}
+            }
+        }
+    }
+    viewer.show(ui, cache, &text);
+}
+
+fn image_alt_text<'a>(source: &'a str, cache: &mut CommonMarkCache) -> Cow<'a, str> {
+    let mut text = String::new();
+    let mut cursor = 0;
+    let mut image_depth = 0;
+    for (event, range) in Parser::new_ext(source, parser_options()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Link { dest_url, .. }) if !web_link(&dest_url) => {
+                cache.add_link_hook(dest_url.as_ref());
+            }
+            Event::Start(Tag::Image { .. }) => {
+                if image_depth == 0 {
+                    text.push_str(&source[cursor..range.start]);
+                    cursor = range.end;
+                }
+                image_depth += 1;
+            }
+            Event::End(TagEnd::Image) => image_depth -= 1,
+            Event::Text(alt) | Event::Code(alt) if image_depth != 0 => {
+                for character in alt.chars() {
+                    if character.is_ascii_punctuation() {
+                        text.push('\\');
+                    }
+                    text.push(character);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak if image_depth != 0 => text.push(' '),
+            _ => {}
+        }
+    }
+    if cursor == 0 {
+        Cow::Borrowed(source)
+    } else {
+        text.push_str(&source[cursor..]);
+        Cow::Owned(text)
+    }
 }
 
 enum Block {
@@ -466,6 +556,74 @@ pub(super) fn reveal_file(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_markdown_does_not_load_image_uris_or_open_local_links() {
+        use egui::load::{LoadError, SizeHint, TextureLoadResult, TextureLoader};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct RecordingLoader(Mutex<Vec<String>>);
+
+        impl TextureLoader for RecordingLoader {
+            fn id(&self) -> &str {
+                "remote markdown test"
+            }
+
+            fn load(
+                &self,
+                _ctx: &egui::Context,
+                uri: &str,
+                _options: egui::TextureOptions,
+                _size: SizeHint,
+            ) -> TextureLoadResult {
+                self.0.lock().unwrap().push(uri.to_owned());
+                Err(LoadError::NotSupported)
+            }
+
+            fn forget(&self, _uri: &str) {}
+            fn forget_all(&self) {}
+            fn byte_size(&self) -> usize {
+                0
+            }
+        }
+
+        let document = "[Local document](file:///tmp/private.md)\n\n\
+            [Web page](https://example.com)\n\n\
+            ![Alt text A](file:///tmp/private.png)\n\n\
+            | Image |\n| --- |\n| ![Alt text B][reference] |\n\n\
+            [reference]: https://example.com/remote.png";
+        let ctx = egui::Context::default();
+        let loads = Arc::new(RecordingLoader::default());
+        ctx.add_texture_loader(loads.clone());
+        let mut cache = CommonMarkCache::default();
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_remote(ui, &mut cache, document);
+            });
+        });
+        assert!(loads.0.lock().unwrap().is_empty());
+        assert_eq!(cache.get_link_hook("file:///tmp/private.md"), Some(false));
+        assert_eq!(cache.get_link_hook("https://example.com"), None);
+        for alt in ["Alt text A", "Alt text B"] {
+            assert!(output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text().contains(alt))
+            }));
+        }
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render(ui, &mut cache, document, Path::new("/tmp"));
+            });
+        });
+        let loads = loads.0.lock().unwrap();
+        assert!(loads.iter().any(|uri| uri == "file:///tmp/private.png"));
+        assert!(
+            loads
+                .iter()
+                .any(|uri| uri == "https://example.com/remote.png")
+        );
+    }
 
     #[test]
     fn code_panels_preserve_nested_markdown_and_reference_links() {

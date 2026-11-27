@@ -49,7 +49,7 @@ impl Provider {
     }
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct Quota {
     pub limits: Vec<QuotaLimit>,
     pub credit_balance: Option<String>,
@@ -57,13 +57,13 @@ pub struct Quota {
     pub reset_credits: Option<u64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct QuotaLimit {
     pub name: String,
     pub windows: Vec<QuotaWindow>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct QuotaWindow {
     pub label: String,
     pub remaining_percent: Option<u8>,
@@ -145,17 +145,17 @@ impl Session {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Inventory {
     pub sessions: Vec<Session>,
     pub warning: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_sessions: Vec<Value>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<Project>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Project {
     pub id: String,
     pub name: String,
@@ -233,7 +233,7 @@ impl CollaborationMode {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PermissionChoice {
     pub id: String,
     pub label: String,
@@ -250,27 +250,28 @@ impl PermissionChoice {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
     Assistant,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Message {
     pub role: Role,
     pub text: String,
     #[serde(skip)]
     pub attachments: Vec<attachments::UserAttachment>,
     #[serde(
+        skip_deserializing,
         skip_serializing_if = "Vec::is_empty",
         serialize_with = "attachments::serialize_local_file_labels"
     )]
     pub local_files: Vec<attachments::LocalAttachment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
-    #[serde(skip_serializing_if = "work::Work::is_empty")]
+    #[serde(default, skip_serializing_if = "work::Work::is_empty")]
     pub work: work::Work,
 }
 
@@ -308,7 +309,7 @@ pub struct Transcript {
     pub revision: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TurnRequest {
     pub provider: Provider,
     #[serde(default)]
@@ -333,7 +334,7 @@ pub struct TurnRequest {
     pub local_files: Vec<attachments::LocalAttachment>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ModelOptions {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -350,7 +351,7 @@ pub struct FollowUpInput {
     pub local_files: Vec<attachments::LocalAttachment>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Question {
     pub id: String,
     pub header: String,

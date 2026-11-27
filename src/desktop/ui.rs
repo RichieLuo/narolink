@@ -1,8 +1,9 @@
-use super::thumbnails::{PromptImage, ThumbnailSource};
+use super::thumbnails::{PromptImage, RemoteImage, ThumbnailSource};
 use super::{style::*, *};
 use crate::{
     engine::{
         Question, QuestionAnswers, ReasoningChoice, Role,
+        attachments::UserAttachment,
         usage::TokenCounts,
         work::{Agent, AgentStatus, FileChange, ReplyPart, Step, StepKind, StepStatus, Work},
     },
@@ -485,10 +486,10 @@ struct SessionGroup {
 }
 
 pub(super) struct QuestionForm {
-    id: String,
+    pub(super) id: String,
     open: bool,
     drafts: Vec<QuestionDraft>,
-    error: Option<String>,
+    pub(super) error: Option<String>,
 }
 
 #[derive(Default)]
@@ -660,11 +661,25 @@ impl Desktop {
             inset,
             Layout::right_to_left(Align::Center),
             |ui| {
+                let device_label = match &self.remote {
+                    Some(remote) => {
+                        language.format("当前设备 · {name}", &[("name", remote.name())])
+                    }
+                    None => language.text("设备连接").to_owned(),
+                };
                 let devices = Icon::Devices
-                    .label(RichText::new(language.text("设备连接")).size(12.))
+                    .label(RichText::new(engine::cut(&device_label, 32)).size(12.))
                     .atom_ui(ui);
-                Icon::Devices.paint_in(ui, &devices, palette.muted);
-                if devices.response.clicked() {
+                Icon::Devices.paint_in(
+                    ui,
+                    &devices,
+                    if self.remote.is_some() {
+                        palette.accent
+                    } else {
+                        palette.muted
+                    },
+                );
+                if devices.response.on_hover_text(device_label).clicked() {
                     self.pair_dialog = true;
                 }
                 if self.view.session.is_some() {
@@ -1320,7 +1335,15 @@ impl Desktop {
             }
             return;
         }
-        ui.label(RichText::new(language.text("本地标题与路径筛选")).size(11.).color(palette.muted));
+        ui.label(
+            RichText::new(language.text(if self.remote.is_some() {
+                "按标题和路径筛选"
+            } else {
+                "本地标题与路径筛选"
+            }))
+            .size(11.)
+            .color(palette.muted),
+        );
         ui.collapsing(language.text("Codex 原生全文搜索"), |ui| {
             let changed = ui.checkbox(&mut self.native_search.archived, language.text("包含已归档会话")).changed();
             if changed || self.native_search.query != self.search {
@@ -1338,45 +1361,78 @@ impl Desktop {
                 self.native_search.query = query.clone();
                 self.native_search.pending = true;
                 self.native_search.error = None;
-                self.background(ctx, move |_| Update::NativeSearch(serial, engine::search(Provider::Codex, &query, archived, None)));
+                self.background(ctx, move |workspace| {
+                    Update::NativeSearch(
+                        serial,
+                        workspace.search(Provider::Codex, &query, archived),
+                    )
+                });
             }
             if self.native_search.pending { ui.label(RichText::new(language.text("正在搜索…")).small().color(palette.muted)); }
             if let Some(error) = &self.native_search.error { ui.label(RichText::new(language.text(error)).small().color(palette.warn)); }
             let mut open = None;
-            egui::ScrollArea::vertical().id_salt("native search hits").max_height(180.).show(ui, |ui| {
-                for (index, hit) in self.native_search.hits.iter().enumerate() {
-                    ui.push_id(index, |ui| {
-                        let row = &hit["thread"];
-                        let title = row["name"].as_str().or(hit["snippet"].as_str()).unwrap_or(language.text("未命名会话"));
-                        if ui.add(Button::new(title).wrap().min_size(vec2(ui.available_width(), 28.))).clicked()
-                            && let Some(id) = row["id"].as_str() { open = Some(id.to_owned()); }
-                        if let Some(snippet) = hit["snippet"].as_str().filter(|snippet| *snippet != title) {
-                            ui.add(Label::new(RichText::new(snippet).small().color(palette.muted)).truncate());
-                        }
-                    });
-                }
-            });
-            if let Some(id) = open {
+            egui::ScrollArea::vertical()
+                .id_salt("native search hits")
+                .max_height(180.)
+                .show(ui, |ui| {
+                    for (index, hit) in self.native_search.hits.iter().enumerate() {
+                        ui.push_id(index, |ui| {
+                            let row = &hit["thread"];
+                            let title = row["name"]
+                                .as_str()
+                                .or(hit["snippet"].as_str())
+                                .unwrap_or(language.text("未命名会话"));
+                            if ui
+                                .add(
+                                    Button::new(title)
+                                        .wrap()
+                                        .min_size(vec2(ui.available_width(), 28.)),
+                                )
+                                .clicked()
+                                && let Some(id) = row["id"].as_str()
+                            {
+                                open = Some(id.to_owned());
+                            }
+                            if let Some(snippet) =
+                                hit["snippet"].as_str().filter(|snippet| *snippet != title)
+                            {
+                                ui.add(
+                                    Label::new(RichText::new(snippet).small().color(palette.muted))
+                                        .truncate(),
+                                );
+                            }
+                        });
+                    }
+                });
+            if let Some(id) = open
+                && self.can_navigate_in_workspace()
+            {
                 let query = self.native_search.query.clone();
-                self.epoch += 1;
+                self.begin_navigation();
                 let epoch = self.epoch;
                 self.view = View::new(Provider::Codex);
                 self.view.id = Some(id.clone());
                 self.action_dialog = None;
                 self.note = None;
                 self.load_models(ctx, Provider::Codex, false);
-                self.restore_permission_mode();
-                self.background(ctx, move |service| {
-                    let result = service.session(Provider::Codex, &id).and_then(|session| {
-                        let mut history = service.transcript(&session, true)?;
-                        // A match is an optional landing aid. Failure to find it must
-                        // not hide a successfully loaded session.
-                        if let Ok(occurrence) = engine::occurrences(&session, &query, None)
-                            && let Some(turn) = occurrence["data"][0]["turnId"].as_str()
-                            && let Some(index) = history.messages.iter().position(|message| message.turn_id.as_deref() == Some(turn))
-                        { history.messages.drain(..index); }
-                        Ok((session, history))
-                    });
+                self.restore_permission_mode(ctx);
+                self.background(ctx, move |workspace| {
+                    let result = workspace.history(Provider::Codex, &id, true).map(
+                        |(session, mut history)| {
+                            // A match is an optional landing aid. Failure to find it must
+                            // not hide a successfully loaded session.
+                            if let Ok(occurrence) = workspace.occurrences(&session, &query)
+                                && let Some(turn) = occurrence["data"][0]["turnId"].as_str()
+                                && let Some(index) = history
+                                    .messages
+                                    .iter()
+                                    .position(|message| message.turn_id.as_deref() == Some(turn))
+                            {
+                                history.messages.drain(..index);
+                            }
+                            (session, history)
+                        },
+                    );
                     Update::Transcript(epoch, result, false)
                 });
             }
@@ -1495,11 +1551,19 @@ impl Desktop {
                 }
                 if projects.is_empty() {
                     let text = if !self.inventory_pending.is_empty() {
-                        language.text("正在读取本机历史…")
+                        language.text(if self.remote.is_some() {
+                            "正在读取会话…"
+                        } else {
+                            "正在读取本机历史…"
+                        })
                     } else if !query.is_empty() {
                         language.text("没有匹配的会话")
                     } else {
-                        language.text("暂无本机会话")
+                        language.text(if self.remote.is_some() {
+                            "暂无会话"
+                        } else {
+                            "暂无本机会话"
+                        })
                     };
                     ui.label(RichText::new(text).color(palette.muted).size(13.));
                 }
@@ -1650,83 +1714,105 @@ impl Desktop {
         ui.add_space(16.);
         ui.add_enabled_ui(!self.view.pending, |ui| {
             ui.label(
-                RichText::new(language.text("工作目录"))
-                    .color(palette.muted)
-                    .size(12.5),
-            );
-            let path = self.folder.display().to_string();
-            let name = self.folder.file_name().map(|name| name.to_string_lossy());
-            let project = self
-                .view
-                .project_id
-                .as_deref()
-                .and_then(|id| self.codex_project(id));
-            let title = project
-                .map(|project| project.name.as_str())
-                .or(name.as_deref())
-                .unwrap_or(if path.is_empty() {
-                    language.text("选择文件夹")
+                RichText::new(language.text(if self.remote.is_some() {
+                    "目标电脑的工作目录"
                 } else {
-                    &path
-                });
-            let (rect, response) =
-                ui.allocate_exact_size(vec2(ui.available_width(), 60.), egui::Sense::click());
-            response.widget_info(|| {
-                WidgetInfo::labeled(
-                    WidgetType::Button,
-                    response.enabled(),
-                    language.text("选择工作目录"),
-                )
-            });
-            let visuals = ui.style().interact(&response);
-            let painter = ui.painter();
-            painter.rect(
-                rect,
-                10,
-                visuals.weak_bg_fill,
-                visuals.bg_stroke,
-                StrokeKind::Inside,
+                    "工作目录"
+                }))
+                .color(palette.muted)
+                .size(12.5),
             );
-            let badge = Rect::from_center_size(
-                egui::pos2(rect.left() + 29., rect.center().y),
-                vec2(32., 32.),
-            );
-            painter.rect_filled(badge, 8, palette.tint);
-            Icon::Folder.paint(painter, badge.center(), palette.accent);
-            Icon::Right.paint(painter, rect.right_center() - vec2(17., 0.), palette.muted);
-            let x = rect.left() + 53.;
-            let width = (rect.width() - 85.).max(1.);
-            let show_path = !path.is_empty() && title != path;
-            if show_path {
-                paint_line(
+            if self.remote.is_some() {
+                let mut directory = self.folder.to_string_lossy().into_owned();
+                if input::text_edit(
                     ui,
-                    egui::pos2(x, rect.top() + 31.),
-                    &path,
-                    11.5,
-                    palette.muted,
-                    width,
-                );
-            }
-            let top = rect.top() + if show_path { 10. } else { 18. };
-            paint_line(ui, egui::pos2(x, top), title, 14., palette.ink, width);
-            if response
-                .on_hover_text(if path.is_empty() {
-                    language.text("选择工作目录")
-                } else {
-                    path.as_str()
-                })
-                .clicked()
-                && let Some(path) = rfd::FileDialog::new()
-                    .set_title(language.text("选择 Naro 的工作目录"))
-                    .pick_folder()
-            {
-                if !project
-                    .is_some_and(|project| project.roots.iter().any(|root| path.starts_with(root)))
+                    TextEdit::singleline(&mut directory)
+                        .desired_width(f32::INFINITY)
+                        .margin(Margin::symmetric(9, 7))
+                        .hint_text(language.text("目标电脑的工作目录")),
+                    false,
+                )
+                .changed()
                 {
+                    self.folder = PathBuf::from(directory);
                     self.view.project_id = None;
+                    self.view.clear_startup_settings();
                 }
-                self.view.clear_startup_settings();
-                self.folder = path;
+            } else {
+                let path = self.folder.display().to_string();
+                let name = self.folder.file_name().map(|name| name.to_string_lossy());
+                let project = self
+                    .view
+                    .project_id
+                    .as_deref()
+                    .and_then(|id| self.codex_project(id));
+                let title = project
+                    .map(|project| project.name.as_str())
+                    .or(name.as_deref())
+                    .unwrap_or(if path.is_empty() {
+                        language.text("选择文件夹")
+                    } else {
+                        &path
+                    });
+                let (rect, response) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 60.), egui::Sense::click());
+                response.widget_info(|| {
+                    WidgetInfo::labeled(
+                        WidgetType::Button,
+                        response.enabled(),
+                        language.text("选择工作目录"),
+                    )
+                });
+                let visuals = ui.style().interact(&response);
+                let painter = ui.painter();
+                painter.rect(
+                    rect,
+                    10,
+                    visuals.weak_bg_fill,
+                    visuals.bg_stroke,
+                    StrokeKind::Inside,
+                );
+                let badge = Rect::from_center_size(
+                    egui::pos2(rect.left() + 29., rect.center().y),
+                    vec2(32., 32.),
+                );
+                painter.rect_filled(badge, 8, palette.tint);
+                Icon::Folder.paint(painter, badge.center(), palette.accent);
+                Icon::Right.paint(painter, rect.right_center() - vec2(17., 0.), palette.muted);
+                let x = rect.left() + 53.;
+                let width = (rect.width() - 85.).max(1.);
+                let show_path = !path.is_empty() && title != path;
+                if show_path {
+                    paint_line(
+                        ui,
+                        egui::pos2(x, rect.top() + 31.),
+                        &path,
+                        11.5,
+                        palette.muted,
+                        width,
+                    );
+                }
+                let top = rect.top() + if show_path { 10. } else { 18. };
+                paint_line(ui, egui::pos2(x, top), title, 14., palette.ink, width);
+                if response
+                    .on_hover_text(if path.is_empty() {
+                        language.text("选择工作目录")
+                    } else {
+                        path.as_str()
+                    })
+                    .clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .set_title(language.text("选择 Naro 的工作目录"))
+                        .pick_folder()
+                {
+                    if !project
+                        .is_some_and(|project| project.roots.iter().any(|root| path.starts_with(root)))
+                    {
+                        self.view.project_id = None;
+                    }
+                    self.view.clear_startup_settings();
+                    self.folder = path;
+                }
             }
 
             ui.add_space(12.);
@@ -1749,7 +1835,7 @@ impl Desktop {
                         self.view.provider = provider;
                         self.view.project_id = None;
                         self.restore_model_preference();
-                        self.restore_permission_mode();
+                        self.restore_permission_mode(ctx);
                         self.view.collaboration_mode = None;
                         self.load_models(ctx, provider, false);
                     }
@@ -1766,11 +1852,12 @@ impl Desktop {
     fn conversation(&mut self, ui: &mut Ui) {
         let palette = Palette::of(ui);
         let language = Language::in_ui(ui);
-        let cwd = self
-            .view
-            .session
-            .as_ref()
-            .map_or(self.folder.as_path(), |session| session.cwd.as_path());
+        let cwd = self.remote.is_none().then(|| {
+            self.view
+                .session
+                .as_ref()
+                .map_or(self.folder.as_path(), |session| session.cwd.as_path())
+        });
         if let Some(warning) = &self.view.transcript.warning {
             ui.label(
                 RichText::new(language.text(warning))
@@ -1795,15 +1882,10 @@ impl Desktop {
         for (index, entry) in self.view.transcript.messages.iter().enumerate().skip(shown) {
             ui.push_id(("message", index), |ui| match entry.role {
                 Role::User => {
-                    let images = entry
-                        .attachments
-                        .iter()
-                        .map(|attachment| PromptImage {
-                            name: &attachment.name,
-                            source: attachment.image.as_ref().map(ThumbnailSource::History),
-                        })
-                        .collect::<Vec<_>>();
-                    self.thumbnails.show(ui, &images);
+                    self.thumbnails.show(
+                        ui,
+                        &history_images(&entry.attachments, self.remote.as_ref()),
+                    );
                     render_prompt_files(ui, &entry.local_files);
                     render_prompt(ui, &entry.text);
                 }
@@ -1831,6 +1913,12 @@ impl Desktop {
                         &entry.work,
                         cwd,
                     );
+                    if let Some(client) = &self.remote {
+                        self.thumbnails.show(
+                            ui,
+                            &history_images(&entry.work.remote_previews, Some(client)),
+                        );
+                    }
                 }
             });
             ui.add_space(10.);
@@ -1844,13 +1932,22 @@ impl Desktop {
         let Some(snapshot) = &self.view.snapshot else {
             return;
         };
-        let cwd = self
-            .view
-            .session
+        let remote = self
+            .remote
             .as_ref()
-            .map_or(self.folder.as_path(), |session| session.cwd.as_path());
+            .map(|client| (client, snapshot.run.id.as_str()));
+        let cwd = remote.is_none().then(|| {
+            self.view
+                .session
+                .as_ref()
+                .map_or(self.folder.as_path(), |session| session.cwd.as_path())
+        });
         let replies = snapshot.replies();
-        let run = self.service.run(&snapshot.run.id).ok();
+        let run = if remote.is_none() {
+            self.service.run(&snapshot.run.id).ok()
+        } else {
+            None
+        };
         let follow_ups = snapshot
             .follow_ups
             .iter()
@@ -1875,7 +1972,7 @@ impl Desktop {
         {
             ui.push_id((&snapshot.run.id, after), |ui| {
                 self.thumbnails
-                    .show(ui, &run_images(run.as_deref(), images, image_start));
+                    .show(ui, &run_images(run.as_deref(), remote, images, image_start));
                 render_prompt_files(ui, files);
                 render_prompt(ui, prompt);
                 for step in replies
@@ -1901,6 +1998,12 @@ impl Desktop {
                         reply.work,
                         cwd,
                     );
+                    if let Some((client, _)) = remote {
+                        self.thumbnails.show(
+                            ui,
+                            &history_images(&reply.work.remote_previews, Some(client)),
+                        );
+                    }
                 }
             });
         }
@@ -1924,6 +2027,7 @@ impl Desktop {
             ui.label(RichText::new(language.text(error)).color(palette.warn));
         }
         if let Some(approval) = &snapshot.approval {
+            let mut decision = None;
             surface(palette, palette.notice, Margin::same(13)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(
@@ -1955,20 +2059,29 @@ impl Desktop {
                         (true, language.text("允许一次")),
                         (false, language.text("拒绝")),
                     ] {
-                        if ui.button(label).clicked() {
-                            let result = self
-                                .service
-                                .run(&snapshot.run.id)
-                                .and_then(|run| run.approve(&approval.id, approved));
-                            self.note = result.err();
+                        if ui
+                            .add_enabled(!self.run_command_pending, Button::new(label))
+                            .clicked()
+                        {
+                            decision = Some(approved);
                         }
                     }
                 });
             });
+            if let Some(allow) = decision {
+                self.run_command(
+                    ui.ctx(),
+                    snapshot.run.id.clone(),
+                    RunCommand::Approve {
+                        approval_id: approval.id.clone(),
+                        allow,
+                    },
+                );
+            }
         }
     }
 
-    fn follow_up_queue(&mut self, ui: &mut Ui, editor_id: egui::Id) {
+    fn follow_up_queue(&mut self, ui: &mut Ui) {
         let palette = Palette::of(ui);
         enum Action {
             Withdraw,
@@ -1988,7 +2101,12 @@ impl Desktop {
             return;
         }
         let run_id = &snapshot.run.id;
-        let run = self.service.run(run_id).ok();
+        let remote = self.remote.as_ref().map(|client| (client, run_id.as_str()));
+        let run = if remote.is_none() {
+            self.service.run(run_id).ok()
+        } else {
+            None
+        };
         let running = snapshot.status == Status::Running && !self.view.stopping;
         let can_steer = snapshot.run.provider.supports_steering();
         let mut action = None;
@@ -2016,7 +2134,7 @@ impl Desktop {
                                         if running && queued {
                                             if ui
                                                 .add_enabled(
-                                                    !self.view.pending,
+                                                    !self.view.pending && !self.run_command_pending,
                                                     Button::new(language.text("撤回修改")).small(),
                                                 )
                                                 .clicked()
@@ -2026,8 +2144,12 @@ impl Desktop {
                                             }
                                             if can_steer
                                                 && ui
-                                                    .small_button(
-                                                        language.text(SendMode::Steer.label()),
+                                                    .add_enabled(
+                                                        !self.run_command_pending,
+                                                        Button::new(
+                                                            language.text(SendMode::Steer.label()),
+                                                        )
+                                                        .small(),
                                                     )
                                                     .clicked()
                                             {
@@ -2076,7 +2198,12 @@ impl Desktop {
                                 });
                                 self.thumbnails.show(
                                     ui,
-                                    &run_images(run.as_deref(), &entry.images, entry.image_start),
+                                    &run_images(
+                                        run.as_deref(),
+                                        remote,
+                                        &entry.images,
+                                        entry.image_start,
+                                    ),
                                 );
                             });
                         }
@@ -2084,31 +2211,11 @@ impl Desktop {
             });
         ui.add_space(5.);
         if let Some((message_id, action)) = action {
-            self.note = match action {
-                Action::Steer => self
-                    .service
-                    .run(run_id)
-                    .and_then(|run| run.steer_queued(message_id))
-                    .err(),
-                Action::Withdraw => match self
-                    .service
-                    .run(run_id)
-                    .and_then(|run| run.withdraw_queued(message_id, true))
-                {
-                    Ok(draft) => {
-                        self.view.show_draft(ComposerDraft {
-                            text: draft.prompt,
-                            images: draft.images,
-                            local_files: draft.local_files,
-                            startup: StartupDraft::default(),
-                            withdrawn: true,
-                        });
-                        ui.memory_mut(|memory| memory.request_focus(editor_id));
-                        None
-                    }
-                    Err(error) => Some(error),
-                },
+            let command = match action {
+                Action::Steer => RunCommand::Steer(message_id.to_owned()),
+                Action::Withdraw => RunCommand::Withdraw(message_id.to_owned()),
             };
+            self.run_command(ui.ctx(), run_id.clone(), command);
         }
     }
 
@@ -2116,8 +2223,8 @@ impl Desktop {
         let palette = Palette::of(ui);
         let language = Language::in_ui(ui);
         let editor_id = ui.make_persistent_id(("prompt", self.epoch));
-        self.follow_up_queue(ui, editor_id);
         self.composer_focus = Some(editor_id);
+        self.follow_up_queue(ui);
         if self.restore_composer_focus && self.action_dialog.is_none() {
             ctx.memory_mut(|memory| memory.request_focus(editor_id));
             self.restore_composer_focus = false;
@@ -2210,9 +2317,18 @@ impl Desktop {
                     let ready = !self.view.pending
                         && !self.native_pending()
                         && !self.view.stopping
+                        && !self.permission_pending
+                        && !self.run_command_pending
+                        && self.remote_error.is_none()
                         && !self.view.ime_composing
                         && has_draft
-                        && (running || self.view.id.is_some() || self.folder.is_dir());
+                        && (running
+                            || self.view.id.is_some()
+                            || if self.remote.is_some() {
+                                !self.folder.to_string_lossy().trim().is_empty()
+                            } else {
+                                self.folder.is_dir()
+                            });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if running && !has_draft && !self.view.pending {
                             self.compose_stop(ui);
@@ -2229,6 +2345,9 @@ impl Desktop {
                 },
             );
             for note in [
+                self.remote_error
+                    .as_deref()
+                    .or_else(|| self.view.run.as_ref().and(self.snapshot_error.as_deref())),
                 self.note.as_deref(),
                 self.model_errors
                     .get(&self.view.provider)
@@ -2308,13 +2427,27 @@ impl Desktop {
     fn composer_attachments(&mut self, ui: &mut Ui, editor_id: egui::Id) {
         let palette = Palette::of(ui);
         let language = Language::in_ui(ui);
-        let title = language.text("添加文件或文件夹");
+        let title = language.text(if self.remote.is_some() {
+            "添加图片"
+        } else {
+            "添加文件或文件夹"
+        });
         let trigger = ui
             .add_enabled_ui(!self.view.pending, |ui| {
                 composer_tool(ui, Icon::Plus, title, palette.composer_text)
             })
             .inner;
         if !trigger.clicked() {
+            return;
+        }
+        if self.remote.is_some() {
+            if let Some(paths) = rfd::FileDialog::new()
+                .set_title(title)
+                .add_filter(title, &["png", "jpg", "jpeg", "gif", "webp"])
+                .pick_files()
+            {
+                self.accept_attachments(ui.ctx(), editor_id, paths);
+            }
             return;
         }
         let directory = self
@@ -2389,7 +2522,7 @@ impl Desktop {
             language.text("停止")
         };
         let action = solid(ui, palette.danger_surface, palette.danger_hover, |ui| {
-            ui.add_enabled_ui(!self.view.stopping, |ui| {
+            ui.add_enabled_ui(!self.view.stopping && !self.run_command_pending, |ui| {
                 let button = Icon::Stop
                     .label(RichText::new(label).color(palette.danger))
                     .min_size(vec2(84., 34.))
@@ -2402,13 +2535,7 @@ impl Desktop {
         if action.clicked()
             && let Some(id) = &self.view.run
         {
-            match self.service.run(id) {
-                Ok(run) => {
-                    run.stop();
-                    self.view.stopping = true;
-                }
-                Err(problem) => self.note = Some(problem),
-            }
+            self.run_command(ui.ctx(), id.clone(), RunCommand::Stop);
         }
     }
 
@@ -2700,8 +2827,9 @@ impl Desktop {
                             .size(12.),
                     );
                 }
-                ui.add_enabled_ui(!self.view.pending, |ui| {
-                    if follows_session && model_row(ui, language.text("跟随会话"), selected.is_none())
+                ui.add_enabled_ui(!self.view.pending && !self.permission_pending, |ui| {
+                    if follows_session
+                        && model_row(ui, language.text("跟随会话"), selected.is_none())
                     {
                         selection = Some(None);
                     }
@@ -2726,14 +2854,7 @@ impl Desktop {
                 }
             });
         if let Some(mode) = selection {
-            match self.service.save_permission_mode(
-                provider,
-                &self.view.permission_target(),
-                mode.as_deref(),
-            ) {
-                Ok(()) => self.view.permission_mode = mode,
-                Err(problem) => self.note = Some(problem),
-            }
+            self.save_permission_mode(ui.ctx(), mode);
         }
     }
 
@@ -2892,7 +3013,7 @@ impl Desktop {
     fn questions(&mut self, ctx: &egui::Context) {
         let palette = Palette::from_context(ctx);
         let language = self.language;
-        let Some(snapshot) = self.view.snapshot.as_mut().filter(|_| !self.view.stopping) else {
+        let Some(snapshot) = self.view.snapshot.as_ref().filter(|_| !self.view.stopping) else {
             self.view.question_form = None;
             return;
         };
@@ -2974,7 +3095,7 @@ impl Desktop {
                     };
                     let submit = ui
                         .add_enabled(
-                            ready,
+                            ready && !self.run_command_pending,
                             Button::new(RichText::new(language.text("提交答案")).color(text))
                                 .fill(fill)
                                 .min_size(vec2(90., 32.)),
@@ -2986,17 +3107,14 @@ impl Desktop {
                 .inner
             });
         if let (Some(answers), _) = modal.inner {
-            match self
-                .service
-                .run(&snapshot.run.id)
-                .and_then(|run| run.answer(&request.id, answers))
-            {
-                Ok(()) => {
-                    self.view.question_form = None;
-                    snapshot.question = None;
-                }
-                Err(error) => form.error = Some(error),
-            }
+            self.run_command(
+                ctx,
+                snapshot.run.id.clone(),
+                RunCommand::Answer {
+                    question_id: request.id.clone(),
+                    answers,
+                },
+            );
         } else if modal.inner.1 || (!modal.backdrop_response.clicked() && modal.should_close()) {
             form.open = false;
         }
@@ -3098,6 +3216,12 @@ impl Desktop {
                 .size(12.),
         );
         ui.add_space(4.);
+        if let Some(error) = &self.token_usage_error {
+            ui.label(RichText::new(language.text(error)).color(palette.warn));
+            if self.token_usage.is_none() {
+                return;
+            }
+        }
         let Some(window) = self.token_usage.as_ref().and_then(|report| {
             report
                 .windows
@@ -3305,13 +3429,15 @@ impl Desktop {
                     .auto_shrink([false, true])
                     .max_height((ctx.content_rect().height() - 128.).max(120.))
                     .show(ui, |ui| {
+                        self.connect_to_device(ui);
+                        ui.add_space(9.);
                         if let Some(address) = device_url {
                             self.pairing_card(ui, address, &code);
                         } else {
                             surface(palette, palette.canvas, Margin::same(16)).show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 ui.label(
-                                    RichText::new(language.text("手机扫码连接"))
+                                    RichText::new(language.text("让其他设备连接本机"))
                                         .size(19.)
                                         .strong(),
                                 );
@@ -3331,8 +3457,6 @@ impl Desktop {
                                 self.relay_fields(ui);
                             });
                         }
-                        ui.add_space(9.);
-                        self.connect_to_device(ui);
                         if remote.connected {
                             ui.add_space(4.);
                             egui::CollapsingHeader::new(language.text("中继设置"))
@@ -3348,7 +3472,7 @@ impl Desktop {
                         ctx.open_url(egui::OpenUrl::new_tab(link));
                     }
                     if let Some(url) = &remote.url
-                        && ui.button(language.text("打开设备列表")).clicked()
+                        && ui.button(language.text("打开中继网页")).clicked()
                     {
                         ctx.open_url(egui::OpenUrl::new_tab(url.clone()));
                     }
@@ -3437,16 +3561,64 @@ impl Desktop {
     fn connect_to_device(&mut self, ui: &mut Ui) {
         let palette = Palette::of(ui);
         let language = Language::in_ui(ui);
+        let pending = self.target_device_pending;
+        let can_switch = self.can_switch_workspace();
         surface(palette, palette.canvas, Margin::same(14)).show(ui, |ui| {
             ui.set_width(ui.available_width());
+            if let Some(device) = &self.remote {
+                let return_to_local = ui
+                    .horizontal(|ui| {
+                        ui.label(RichText::new(language.text("当前设备")).color(palette.muted));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let clicked = ui
+                                .add_enabled(can_switch, Button::new(language.text("返回本机")))
+                                .clicked();
+                            ui.add(Label::new(RichText::new(device.name()).strong()).truncate())
+                                .on_hover_text(device.name());
+                            clicked
+                        })
+                        .inner
+                    })
+                    .inner;
+                ui.add(
+                    Label::new(
+                        RichText::new(device.address())
+                            .monospace()
+                            .size(12.)
+                            .color(palette.muted),
+                    )
+                    .wrap(),
+                );
+                if return_to_local {
+                    self.return_to_local(ui.ctx());
+                }
+                return;
+            }
+            if let Some((device, _)) = &self.recent_device {
+                let label = language.format("重新连接 {name}", &[("name", device.name())]);
+                if ui.add_enabled(can_switch, Button::new(label)).clicked() {
+                    self.reopen_device(ui.ctx());
+                    return;
+                }
+                ui.add_space(5.);
+                ui.separator();
+            }
             ui.label(
                 RichText::new(language.text("连接另一台设备"))
                     .size(15.)
                     .strong(),
             );
-            ui.horizontal(|ui| {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let button_clicked = ui.button(language.text("在浏览器中连接")).clicked();
+            ui.label(
+                RichText::new(
+                    language.text("设备地址和配对码在目标电脑的「设备连接 → 手动配对」中。"),
+                )
+                .size(12.5)
+                .color(palette.muted),
+            );
+            let enter = ui
+                .add_enabled_ui(!pending, |ui| {
+                    let address_label =
+                        ui.label(RichText::new(language.text("设备地址")).color(palette.muted));
                     let address = input::text_edit(
                         ui,
                         TextEdit::singleline(&mut self.target_device_url)
@@ -3454,24 +3626,39 @@ impl Desktop {
                             .margin(Margin::symmetric(9, 7))
                             .hint_text(language.text("粘贴目标电脑提供的设备地址")),
                         false,
-                    );
-                    if address.changed() {
+                    )
+                    .labelled_by(address_label.id);
+                    let code_label =
+                        ui.label(RichText::new(language.text("配对码")).color(palette.muted));
+                    let code = input::text_edit(
+                        ui,
+                        TextEdit::singleline(&mut self.target_device_code)
+                            .desired_width(132.)
+                            .margin(Margin::symmetric(9, 7))
+                            .hint_text(language.text("8 位数字")),
+                        false,
+                    )
+                    .labelled_by(code_label.id);
+                    if address.changed() || code.changed() {
                         self.target_device_error = None;
                     }
-                    if button_clicked
-                        || (address.lost_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
-                    {
-                        match crate::web::device_url(&self.target_device_url) {
-                            Ok(url) => {
-                                self.target_device_error = None;
-                                ui.ctx().open_url(egui::OpenUrl::new_tab(url.to_string()));
-                            }
-                            Err(error) => self.target_device_error = Some(error),
-                        }
-                    }
-                });
-            });
+                    (address.lost_focus() || code.lost_focus())
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                })
+                .inner;
+            let label = if pending {
+                "正在配对…"
+            } else {
+                "配对并连接"
+            };
+            let clicked = ui
+                .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    action_dialog_primary(ui, language.text(label), can_switch)
+                })
+                .inner;
+            if can_switch && (clicked || enter) {
+                self.connect_device(ui.ctx());
+            }
             if let Some(error) = &self.target_device_error {
                 ui.label(RichText::new(language.text(error)).color(palette.warn));
             }
@@ -4518,7 +4705,7 @@ mod effort_tests {
                         &mut files,
                         "BeforeAfter",
                         &work,
-                        Path::new("/tmp"),
+                        Some(Path::new("/tmp")),
                     );
                 });
             },
@@ -4847,7 +5034,7 @@ fn render_progress_note(
     files: &mut files::FileViewer,
     id: &str,
     text: &str,
-    cwd: &Path,
+    cwd: Option<&Path>,
 ) {
     if !text.is_empty() {
         ui.add_space(8.);
@@ -4862,10 +5049,14 @@ fn render_document(
     cache: &mut egui_commonmark::CommonMarkCache,
     files: &mut files::FileViewer,
     text: &str,
-    cwd: &Path,
+    cwd: Option<&Path>,
 ) {
-    if let Some(path) = markdown::render(ui, cache, text, cwd) {
-        files.open(ui.ctx(), path, cwd);
+    if let Some(cwd) = cwd {
+        if let Some(path) = markdown::render(ui, cache, text, cwd) {
+            files.open(ui.ctx(), path, cwd);
+        }
+    } else {
+        markdown::render_remote(ui, cache, text);
     }
 }
 
@@ -4907,15 +5098,41 @@ fn local_file_chip(ui: &mut Ui, file: &LocalAttachment, removable: bool) -> egui
     button.response.on_hover_text(&file.path)
 }
 
-fn run_images<'a>(run: Option<&Run>, names: &'a [String], start: usize) -> Vec<PromptImage<'a>> {
+fn history_images<'a>(
+    attachments: &'a [UserAttachment],
+    remote: Option<&'a remote::RemoteClient>,
+) -> Vec<PromptImage<'a>> {
+    attachments
+        .iter()
+        .map(|attachment| PromptImage {
+            name: &attachment.name,
+            source: attachment
+                .image
+                .as_ref()
+                .and_then(|image| ThumbnailSource::history(image, remote)),
+        })
+        .collect()
+}
+
+fn run_images<'a>(
+    run: Option<&Run>,
+    remote: Option<(&'a remote::RemoteClient, &'a str)>,
+    names: &'a [String],
+    start: usize,
+) -> Vec<PromptImage<'a>> {
     names
         .iter()
         .enumerate()
         .map(|(index, name)| PromptImage {
             name,
-            source: run
-                .and_then(|run| run.image(start + index))
-                .map(ThumbnailSource::Sent),
+            source: start.checked_add(index).and_then(|index| {
+                if let Some((client, id)) = remote {
+                    Some(ThumbnailSource::Remote(client, RemoteImage::Run(id, index)))
+                } else {
+                    run.and_then(|run| run.image(index))
+                        .map(ThumbnailSource::Sent)
+                }
+            }),
         })
         .collect()
 }
@@ -4978,7 +5195,7 @@ fn render_reply(
     files: &mut files::FileViewer,
     text: &str,
     work: &Work,
-    cwd: &Path,
+    cwd: Option<&Path>,
 ) {
     let language = Language::in_ui(ui);
     if !work.plan.is_empty() {
@@ -5118,7 +5335,7 @@ fn render_work_steps(
     cache: &mut egui_commonmark::CommonMarkCache,
     files: &mut files::FileViewer,
     steps: &[Step],
-    cwd: &Path,
+    cwd: Option<&Path>,
 ) {
     let palette = Palette::of(ui);
     let language = Language::in_ui(ui);
@@ -5262,7 +5479,14 @@ fn wide_markdown_table_does_not_expand_chat_or_prevent_scrolling() {
                                     ui.add_space(400.);
                                     for (index, text) in [&reply, &paragraph].into_iter().enumerate() {
                                         ui.push_id(("message", index), |ui| {
-                                            render_reply(ui, &mut cache, &mut files, text, &work, cwd);
+                                            render_reply(
+                                                ui,
+                                                &mut cache,
+                                                &mut files,
+                                                text,
+                                                &work,
+                                                Some(cwd),
+                                            );
                                         });
                                     }
                                 });
@@ -5347,7 +5571,7 @@ fn expanded_work_panel_renders_thinking_markdown() {
     )];
     let output = ctx.run(egui::RawInput::default(), |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
-            render_work_steps(ui, &mut cache, &mut files, &steps, Path::new("/tmp"));
+            render_work_steps(ui, &mut cache, &mut files, &steps, Some(Path::new("/tmp")));
         });
     });
     let labels = output.shapes.iter().filter_map(|shape| {
