@@ -10,7 +10,7 @@ Pick up your Codex, Claude Code, and Antigravity sessions from a computer, phone
 
 ![Naro relay flow. The host opens a single outbound WSS connection and sends heartbeats when idle. The Go relay multiplexes HTTPS requests and SSE replies in memory.](assets/readme/relay.en.png)
 
-Each host opens **one outbound WSS connection** to the Go relay with no inbound ports required, sending only heartbeats while idle. The relay multiplexes concurrent requests, chunked responses, and streamed replies over that single connection by request ID, so stop, approval, and follow-up requests stay responsive during streaming. Browsers and remote desktops continue using the existing HTTPS API and SSE. The host verifies the pairing code and clients keep the pairing credential. The relay keeps only in-memory device routing, names, and online status, cleaning up pending requests immediately on completion, timeout, or disconnect. After a disconnect or relay restart, the host reconnects with jittered exponential backoff without automatically re-running side-effecting requests. New desktop builds fall back to HTTPS long polling only after confirming an older relay does not support WSS, and the new relay remains compatible with older desktop clients.
+Each host opens **one outbound WSS connection** to the Go relay with no inbound ports required, sending only heartbeats while idle. The relay multiplexes concurrent requests, chunked responses, and streamed replies over that single connection by request ID, so stop, approval, and follow-up requests stay responsive during streaming. Browsers and remote desktops continue using the existing HTTPS API and SSE. The host verifies the pairing code and clients keep the pairing credential. The relay keeps only in-memory device routing, names, and online status, cleaning up pending requests immediately on completion, timeout, or disconnect. After a disconnect or relay restart, the host reconnects with jittered exponential backoff without automatically re-running side-effecting requests.
 
 The HTTPS reverse proxy (Nginx) in the official deployment keeps access logs that include source IP addresses and request paths.
 
@@ -68,7 +68,7 @@ server {
     client_max_body_size 36m;
 
     # Single host-to-relay WSS connection (25s idle heartbeat)
-    location ~ ^/relay/devices/[a-f0-9]{32}/ws$ {
+    location ~ "^/relay/devices/[a-f0-9]{32}/ws$" {
         proxy_pass http://127.0.0.1:7319;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -79,7 +79,7 @@ server {
         proxy_send_timeout 90s;
     }
 
-    # Browser HTTPS API, SSE reply streams, and legacy long-polling compatibility
+    # Browser HTTPS API and SSE reply streams
     location / {
         proxy_pass http://127.0.0.1:7319;
         proxy_http_version 1.1;

@@ -1,18 +1,11 @@
 mod ws;
 
-use base64::Engine as _;
-use reqwest::{
-    Client as AsyncClient, Method, Url,
-    blocking::{Body, Client, RequestBuilder, Response},
-    header,
-    redirect::Policy,
-};
-use serde::{Deserialize, Serialize};
+use reqwest::{Client as AsyncClient, Method, Url, header, redirect::Policy};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    io::{Read, Write},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -98,27 +91,6 @@ pub struct Config {
     pub device_url: Option<String>,
     pub detail: String,
     pub connected: bool,
-}
-
-#[derive(Deserialize)]
-struct Work {
-    id: String,
-    method: String,
-    path: String,
-    origin: Option<String>,
-    content_type: Option<String>,
-    cookie: Option<String>,
-    body: Option<Value>,
-    #[serde(default)]
-    stream: bool,
-}
-
-#[derive(Serialize)]
-struct Answer {
-    status: u16,
-    content_type: Option<String>,
-    set_cookie: Option<String>,
-    body: String,
 }
 
 #[derive(Deserialize)]
@@ -281,7 +253,6 @@ impl SeenIds {
         }
     }
 
-    /// Returns true if this ID has not been seen before.
     fn insert(&mut self, id: [u8; 16]) -> bool {
         if !self.set.insert(id) {
             return false;
@@ -452,16 +423,11 @@ impl Remote {
     }
 
     async fn coordinator_loop(&self, origin: String, bearer: Arc<str>, stop: Arc<StopSignal>) {
-        let (Ok(ws_client), Ok(probe_client), Ok(local_client), Ok(stream_local)) = (
+        let (Ok(ws_client), Ok(local_client), Ok(stream_local)) = (
             AsyncClient::builder()
                 .http1_only()
                 .redirect(Policy::none())
                 .connect_timeout(Duration::from_secs(7))
-                .build(),
-            AsyncClient::builder()
-                .redirect(Policy::none())
-                .connect_timeout(Duration::from_secs(7))
-                .timeout(Duration::from_secs(12))
                 .build(),
             AsyncClient::builder()
                 .no_proxy()
@@ -525,27 +491,7 @@ impl Remote {
                     return;
                 }
                 ConnectOutcome::UnsupportedByRelay => {
-                    match self.probe_legacy_hello(&probe_client, &origin, &bearer).await {
-                        LegacyProbe::Supported => {
-                            backoff.reset();
-                            self.run_legacy_fallback(&origin, &bearer, &stop).await;
-                            if stop.is_stopped() {
-                                return;
-                            }
-                            self.status_for(&stop, false, "正在重连。检查服务器地址和 HTTPS。");
-                        }
-                        LegacyProbe::AuthRejected => {
-                            self.status_for(&stop, false, "服务器拒绝了连接密钥");
-                            stop.stop();
-                            return;
-                        }
-                        LegacyProbe::MissingEndpoint => {
-                            self.status_for(&stop, false, "中继没有设备连接接口，请更新中继版本。");
-                        }
-                        LegacyProbe::Retryable => {
-                            self.status_for(&stop, false, "正在重连。检查服务器地址和 HTTPS。");
-                        }
-                    }
+                    self.status_for(&stop, false, "中继不支持 WSS 长连接，请更新中继版本。");
                 }
                 ConnectOutcome::UpgradeBlocked => {
                     self.status_for(
@@ -564,28 +510,6 @@ impl Remote {
                 _ = tokio::time::sleep(delay) => {}
                 _ = wait_true(&mut stop_rx) => return,
             }
-        }
-    }
-
-    async fn probe_legacy_hello(
-        &self,
-        client: &AsyncClient,
-        origin: &str,
-        bearer: &str,
-    ) -> LegacyProbe {
-        let url = format!("{origin}/relay/devices/{}/hello", self.0.device_id);
-        let response = client
-            .post(&url)
-            .bearer_auth(bearer)
-            .header("X-Naro-Device-Key", &self.0.device_key)
-            .json(&json!({"name": &self.0.device_name, "streaming": true}))
-            .send()
-            .await;
-        match response {
-            Ok(resp) if resp.status().is_success() => LegacyProbe::Supported,
-            Ok(resp) if matches!(resp.status().as_u16(), 401 | 403) => LegacyProbe::AuthRejected,
-            Ok(resp) if resp.status().as_u16() == 404 => LegacyProbe::MissingEndpoint,
-            _ => LegacyProbe::Retryable,
         }
     }
 
@@ -662,7 +586,8 @@ impl Remote {
         let mut pending_bytes: usize = 0;
         let mut seen_ids = SeenIds::new();
 
-        let max_inbound_frame = WS_BIN_HEADER_LEN + params.max_chunk_bytes.max(DEFAULT_MAX_CHUNK_BYTES);
+        let max_inbound_frame =
+            WS_BIN_HEADER_LEN + params.max_chunk_bytes.max(DEFAULT_MAX_CHUNK_BYTES);
         let heartbeat_interval = Duration::from_secs(params.heartbeat_sec);
         let mut heartbeat_tick = tokio::time::interval_at(
             tokio::time::Instant::now() + heartbeat_interval,
@@ -856,7 +781,6 @@ impl Remote {
             }
         }
 
-        // Immediately cancel all active jobs, SSE streams, and pending buffers on disconnect.
         let _ = session_cancel_tx.send(true);
         assembling.clear();
         for (_, job) in active_jobs.lock().unwrap().drain() {
@@ -1114,200 +1038,6 @@ impl Remote {
             }
         });
     }
-
-    async fn run_legacy_fallback(
-        &self,
-        origin: &str,
-        bearer: &Arc<str>,
-        parent_stop: &Arc<StopSignal>,
-    ) {
-        let local_stop = Arc::new(AtomicBool::new(false));
-        let streams = Arc::new(Semaphore::new(DEVICE_MAX_STREAMS));
-        let mut handles = Vec::with_capacity(4);
-        for _ in 0..4 {
-            let settings = self.clone();
-            let url = origin.to_owned();
-            let bearer = bearer.clone();
-            let parent = parent_stop.clone();
-            let local = local_stop.clone();
-            let streams = streams.clone();
-            if let Ok(handle) = std::thread::Builder::new()
-                .name("naro-legacy-poll".into())
-                .spawn(move || settings.legacy_worker(&url, &bearer, &parent, &local, &streams))
-            {
-                handles.push(handle);
-            }
-        }
-        let mut stop_rx = parent_stop.subscribe();
-        loop {
-            if parent_stop.is_stopped() || local_stop.load(Ordering::Acquire) {
-                local_stop.store(true, Ordering::Release);
-                break;
-            }
-            tokio::select! {
-                _ = wait_true(&mut stop_rx) => {
-                    local_stop.store(true, Ordering::Release);
-                    break;
-                }
-                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
-            }
-        }
-        for handle in handles {
-            let _ = tokio::task::spawn_blocking(move || {
-                let _ = handle.join();
-            })
-            .await;
-        }
-    }
-
-    fn legacy_worker(
-        &self,
-        origin: &str,
-        bearer: &str,
-        parent_stop: &StopSignal,
-        local_stop: &AtomicBool,
-        streams: &Arc<Semaphore>,
-    ) {
-        let build = || {
-            Client::builder()
-                .redirect(Policy::none())
-                .connect_timeout(Duration::from_secs(7))
-        };
-        let (Ok(relay), Ok(local), Ok(stream_relay), Ok(stream_local)) = (
-            build().timeout(Duration::from_secs(30)).build(),
-            build().no_proxy().timeout(Duration::from_secs(28)).build(),
-            build().timeout(None).build(),
-            build().no_proxy().timeout(None).build(),
-        ) else {
-            self.status_for(parent_stop, false, "无法初始化 HTTP 客户端");
-            return;
-        };
-        let authority = origin
-            .split_once("://")
-            .map(|(_, host)| host)
-            .unwrap_or_default();
-        let endpoint = format!("{origin}/relay/devices/{}", self.0.device_id);
-        let request = |client: &Client, operation: &str| {
-            client
-                .post(format!("{endpoint}/{operation}"))
-                .bearer_auth(bearer)
-                .header("X-Naro-Device-Key", &self.0.device_key)
-        };
-        let mut registered = false;
-        while !parent_stop.is_stopped() && !local_stop.load(Ordering::Acquire) {
-            let response = if registered {
-                request(&relay, "poll").send()
-            } else {
-                request(&relay, "hello")
-                    .json(&json!({"name": &self.0.device_name, "streaming": true}))
-                    .send()
-            };
-            match response {
-                Ok(response) if response.status().is_success() => {
-                    self.status_for(parent_stop, true, "中继服务器已连接");
-                    registered = true;
-                    if response.status().as_u16() == 204 {
-                        continue;
-                    }
-                    let Ok(work) = read_work(response) else {
-                        continue;
-                    };
-                    if parent_stop.is_stopped() || local_stop.load(Ordering::Acquire) {
-                        return;
-                    }
-                    let reply = request(&relay, &format!("answer/{}", work.id));
-                    if work.stream {
-                        if let Ok(permit) = streams.clone().try_acquire_owned() {
-                            let local = self.local_request(&stream_local, authority, &work);
-                            let upload = request(&stream_relay, &format!("stream/{}", work.id));
-                            let fallback = request(&relay, &format!("answer/{}", work.id));
-                            let task = std::thread::Builder::new().name("naro-reply-stream".into());
-                            if task
-                                .spawn(move || {
-                                    let _permit = permit;
-                                    forward_stream(local, upload, fallback);
-                                })
-                                .is_ok()
-                            {
-                                continue;
-                            }
-                        }
-                        let _ = reply.json(&unavailable()).send();
-                    } else {
-                        let answer = self
-                            .local_request(&local, authority, &work)
-                            .and_then(|request| request.send().map_err(|_| ()))
-                            .and_then(read_answer)
-                            .unwrap_or_else(|()| unavailable());
-                        let _ = reply.json(&answer).send();
-                    }
-                    continue;
-                }
-                Ok(response) if matches!(response.status().as_u16(), 401 | 403) => {
-                    self.status_for(parent_stop, false, "服务器拒绝了连接密钥");
-                    parent_stop.stop();
-                    return;
-                }
-                Ok(response) if response.status().as_u16() == 404 => {
-                    // Relay may have restarted or upgraded to WSS — exit fallback so coordinator retries WSS.
-                    local_stop.store(true, Ordering::Release);
-                    return;
-                }
-                Ok(_) | Err(_) => {
-                    // Connection lost or relay restarted — exit fallback so coordinator retries WSS with jittered backoff.
-                    local_stop.store(true, Ordering::Release);
-                    return;
-                }
-            }
-        }
-    }
-
-    fn local_request(
-        &self,
-        local: &Client,
-        authority: &str,
-        work: &Work,
-    ) -> Result<RequestBuilder, ()> {
-        let method = match work.method.as_str() {
-            "GET" => Method::GET,
-            "HEAD" => Method::HEAD,
-            "POST" => Method::POST,
-            _ => return Err(()),
-        };
-        if !work.path.starts_with("/api/") || work.path.len() > 2048 {
-            return Err(());
-        }
-        let target = Url::parse(&format!("{}{}", self.0.local, work.path)).map_err(|_| ())?;
-        if !target.path().starts_with("/api/") {
-            return Err(());
-        }
-        let mut request = local
-            .request(method, target)
-            .header(header::HOST, authority);
-        if let Some(origin) = &work.origin {
-            request = request.header(header::ORIGIN, origin);
-        }
-        if let Some(cookie) = &work.cookie {
-            request = request.header(header::COOKIE, cookie);
-        }
-        if let Some(content_type) = &work.content_type {
-            request = request.header(header::CONTENT_TYPE, content_type);
-        }
-        if let Some(body) = &work.body {
-            request = request.json(body);
-        }
-        if work.stream {
-            request = request.header(header::ACCEPT, "text/event-stream");
-        }
-        Ok(request)
-    }
-}
-
-enum LegacyProbe {
-    Supported,
-    AuthRejected,
-    MissingEndpoint,
-    Retryable,
 }
 
 async fn read_hello_ack(reader: &mut WsReader, writer: &mut WsWriter) -> Option<SessionParams> {
@@ -1473,73 +1203,6 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-fn forward_stream(
-    local: Result<RequestBuilder, ()>,
-    upload: RequestBuilder,
-    fallback: RequestBuilder,
-) {
-    let response = local.and_then(|request| request.send().map_err(|_| ()));
-    let answer = match response {
-        Ok(response)
-            if response.status().is_success()
-                && response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .is_some_and(|value| value == "text/event-stream") =>
-        {
-            if upload
-                .header(header::CONTENT_TYPE, "text/event-stream")
-                .body(Body::new(response))
-                .send()
-                .is_ok_and(|response| response.status().is_success())
-            {
-                return;
-            }
-            unavailable()
-        }
-        Ok(response) => read_answer(response).unwrap_or_else(|()| unavailable()),
-        Err(()) => unavailable(),
-    };
-    let _ = fallback.json(&answer).send();
-}
-
-fn unavailable() -> Answer {
-    Answer {
-        status: 502,
-        content_type: Some("application/json".into()),
-        set_cookie: None,
-        body: base64::engine::general_purpose::STANDARD
-            .encode(br#"{"error":"Naro local API unavailable"}"#),
-    }
-}
-
-fn read_answer(response: Response) -> Result<Answer, ()> {
-    let status = response.status().as_u16();
-    let header_string = |name| {
-        response
-            .headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned)
-    };
-    let content_type = header_string(header::CONTENT_TYPE);
-    let set_cookie = header_string(header::SET_COOKIE);
-    let mut encoder =
-        base64::write::EncoderWriter::new(Vec::new(), &base64::engine::general_purpose::STANDARD);
-    let count = std::io::copy(&mut response.take(MAX_WIRE + 1), &mut encoder).map_err(|_| ())?;
-    if count > MAX_WIRE {
-        return Err(());
-    }
-    encoder.flush().map_err(|_| ())?;
-    let body = String::from_utf8(encoder.finish().map_err(|_| ())?).map_err(|_| ())?;
-    Ok(Answer {
-        status,
-        content_type,
-        set_cookie,
-        body,
-    })
-}
-
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -1564,22 +1227,6 @@ fn device_name() -> String {
         .chars()
         .take(80)
         .collect()
-}
-
-fn read_work(response: reqwest::blocking::Response) -> Result<Work, ()> {
-    let mut bytes = Vec::new();
-    response
-        .take(MAX_WIRE + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| ())?;
-    if bytes.len() as u64 > MAX_WIRE {
-        return Err(());
-    }
-    let work: Work = serde_json::from_slice(&bytes).map_err(|_| ())?;
-    if work.id.len() != 32 || !work.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(());
-    }
-    Ok(work)
 }
 
 pub fn normalize(value: &str) -> Result<String, String> {
@@ -1662,12 +1309,11 @@ mod tests {
             id[..8].copy_from_slice(&(i as u64 + 100).to_be_bytes());
             assert!(seen.insert(id));
         }
-        // `first` has been evicted after SEEN_ID_CAP newer entries.
         assert!(seen.insert(first));
     }
 
     #[test]
-    fn falls_back_to_long_polling_only_when_old_relay_confirmed() {
+    fn never_uses_legacy_polling_when_relay_lacks_wss() {
         #[derive(Clone, Default)]
         struct OldRelayState {
             ws_hits: Arc<AtomicUsize>,
@@ -1699,7 +1345,6 @@ mod tests {
                 "/relay/devices/{id}/poll",
                 post(|State(s): State<OldRelayState>| async move {
                     s.poll_hits.fetch_add(1, Ordering::AcqRel);
-                    tokio::time::sleep(Duration::from_millis(120)).await;
                     StatusCode::NO_CONTENT
                 }),
             )
@@ -1724,28 +1369,28 @@ mod tests {
             .connect(&format!("http://{addr}"), "x".repeat(64))
             .unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
             rt.block_on(async { tokio::time::sleep(Duration::from_millis(30)).await });
-            if remote.status().connected && state.poll_hits.load(Ordering::Acquire) > 0 {
+            if state.ws_hits.load(Ordering::Acquire) >= 2 {
                 break;
             }
         }
-        assert!(state.ws_hits.load(Ordering::Acquire) >= 1);
-        assert!(state.hello_hits.load(Ordering::Acquire) >= 1);
-        assert!(state.poll_hits.load(Ordering::Acquire) >= 1);
-        assert!(remote.status().connected);
+        assert!(state.ws_hits.load(Ordering::Acquire) >= 2);
+        assert_eq!(state.hello_hits.load(Ordering::Acquire), 0);
+        assert_eq!(state.poll_hits.load(Ordering::Acquire), 0);
+        assert!(!remote.status().connected);
+        assert!(remote.status().detail.contains("WSS"));
 
         remote.shutdown();
         let _ = shutdown_tx.send(());
     }
 
     #[test]
-    fn does_not_fallback_when_new_relay_reports_upgrade_blocked() {
+    fn reports_upgrade_blocked_without_falling_back() {
         #[derive(Clone, Default)]
         struct BlockedState {
             ws_hits: Arc<AtomicUsize>,
-            hello_hits: Arc<AtomicUsize>,
         }
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1763,13 +1408,6 @@ mod tests {
                         [("X-Naro-Relay-WS", "1"), ("Upgrade", "websocket")],
                     )
                         .into_response()
-                }),
-            )
-            .route(
-                "/relay/devices/{id}/hello",
-                post(|State(s): State<BlockedState>| async move {
-                    s.hello_hits.fetch_add(1, Ordering::AcqRel);
-                    StatusCode::NO_CONTENT
                 }),
             )
             .with_state(state.clone());
@@ -1800,74 +1438,9 @@ mod tests {
                 break;
             }
         }
-        assert!(state.ws_hits.load(Ordering::Acquire) >= 1);
-        assert_eq!(state.hello_hits.load(Ordering::Acquire), 0);
+        assert!(state.ws_hits.load(Ordering::Acquire) >= 2);
         assert!(!remote.status().connected);
         assert!(remote.status().detail.contains("WebSocket"));
-
-        remote.shutdown();
-        let _ = shutdown_tx.send(());
-    }
-
-    #[test]
-    fn transient_503_retries_ws_without_falling_back_to_long_polling() {
-        #[derive(Clone, Default)]
-        struct TransientState {
-            ws_hits: Arc<AtomicUsize>,
-            hello_hits: Arc<AtomicUsize>,
-        }
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let state = TransientState::default();
-        let app = Router::new()
-            .route(
-                "/relay/devices/{id}/ws",
-                get(|State(s): State<TransientState>| async move {
-                    s.ws_hits.fetch_add(1, Ordering::AcqRel);
-                    StatusCode::SERVICE_UNAVAILABLE
-                }),
-            )
-            .route(
-                "/relay/devices/{id}/hello",
-                post(|State(s): State<TransientState>| async move {
-                    s.hello_hits.fetch_add(1, Ordering::AcqRel);
-                    StatusCode::NO_CONTENT
-                }),
-            )
-            .with_state(state.clone());
-
-        let (addr, shutdown_tx) = rt.block_on(async {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-            tokio::spawn(async move {
-                let _ = axum::serve(listener, app)
-                    .with_graceful_shutdown(async {
-                        let _ = rx.await;
-                    })
-                    .await;
-            });
-            (addr, tx)
-        });
-
-        let remote = Remote::new("http://127.0.0.1:1".into(), None, [11u8; 32]);
-        remote
-            .connect(&format!("http://{addr}"), "x".repeat(64))
-            .unwrap();
-
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            rt.block_on(async { tokio::time::sleep(Duration::from_millis(30)).await });
-            if state.ws_hits.load(Ordering::Acquire) >= 2 {
-                break;
-            }
-        }
-        assert!(state.ws_hits.load(Ordering::Acquire) >= 2);
-        assert_eq!(state.hello_hits.load(Ordering::Acquire), 0);
-        assert!(!remote.status().connected);
 
         remote.shutdown();
         let _ = shutdown_tx.send(());

@@ -374,7 +374,7 @@ func (d *desktop) attachWS(session *wsSession, name string, streaming bool) *wsS
 	d.ws = session
 	d.name = name
 	d.streaming = streaming
-	d.lastPoll = time.Time{}
+	d.lastSeen = time.Now()
 	return old
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "narolink"
-version = "0.1.18"
+version = "0.1.21"
 edition = "2024"
 rust-version = "1.89"
 description = "Naro — a workspace for local coding agents"

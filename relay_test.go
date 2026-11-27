@@ -23,133 +23,6 @@ import (
 
 const testOrigin = "https://phone.example.test"
 
-func gatewayForTest(t *testing.T) *relay {
-	t.Helper()
-	r, err := newRelay(testOrigin, strings.Repeat("x", 64))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return r
-}
-
-func TestAnonymousUploadDoesNotReachDesktop(t *testing.T) {
-	r := gatewayForTest(t)
-	request := httptest.NewRequest(http.MethodPost, testOrigin+"/api/runs", strings.NewReader("{}"))
-	request.Header.Set("Origin", testOrigin)
-	request.AddCookie(&http.Cookie{Name: deviceCookie, Value: "forged"})
-	response := httptest.NewRecorder()
-	r.ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized || len(r.legacy.queue) != 0 {
-		t.Fatalf("unpaired request reached relay queue: status %d, queued %d", response.Code, len(r.legacy.queue))
-	}
-}
-
-func TestPairingSetsSecureCookieForHTTPS(t *testing.T) {
-	r := gatewayForTest(t)
-	r.legacy.touch()
-	request := httptest.NewRequest(http.MethodPost, testOrigin+"/api/pair", strings.NewReader(`{"code":"12345678"}`))
-	request.Header.Set("Origin", testOrigin)
-	request.Header.Set("Content-Type", "application/json")
-	response := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		r.ServeHTTP(response, request)
-		close(done)
-	}()
-	select {
-	case id := <-r.legacy.queue:
-		r.legacy.mu.Lock()
-		job := r.legacy.waiting[id]
-		r.legacy.mu.Unlock()
-		cookie := fmt.Sprintf("narolink=%d.example.signature; Path=/; Secure; HttpOnly",
-			time.Now().Add(time.Hour).Unix())
-		job.reply <- answer{Status: 200, SetCookie: cookie}
-	case <-time.After(time.Second):
-		t.Fatal("pairing request did not reach the desktop")
-	}
-	<-done
-	cookies := response.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != deviceCookie || !cookies[0].Secure ||
-		!cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
-		t.Fatalf("HTTPS device cookie has incorrect scope; status %d", response.Code)
-	}
-	read := httptest.NewRequest(http.MethodGet, testOrigin+"/api/access", nil)
-	read.AddCookie(cookies[0])
-	if _, paired := r.legacy.unwrap(read, deviceCookie, "/"); !paired {
-		t.Fatal("paired HTTPS cookie cannot be validated")
-	}
-}
-
-func TestFollowUpUploadReachesDesktop(t *testing.T) {
-	r := gatewayForTest(t)
-	r.legacy.touch()
-	path := "/api/runs/active-run/messages"
-	body := `{"mode":"queue","prompt":"review this","images":[{"name":"screenshot.png","data":"` +
-		strings.Repeat("A", 5000) + `"}]}`
-	request := httptest.NewRequest(http.MethodPost, testOrigin+path, strings.NewReader(body))
-	request.Header.Set("Origin", testOrigin)
-	request.Header.Set("Content-Type", "application/json")
-	inner := fmt.Sprintf("%d.example.signature", time.Now().Add(time.Hour).Unix())
-	request.AddCookie(&http.Cookie{Name: deviceCookie, Value: r.legacy.wrap(inner, "/")})
-	response := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		r.ServeHTTP(response, request)
-		close(done)
-	}()
-	select {
-	case id := <-r.legacy.queue:
-		r.legacy.mu.Lock()
-		job := r.legacy.waiting[id]
-		r.legacy.mu.Unlock()
-		job.reply <- answer{Status: http.StatusNoContent}
-		if job.work.Path != path || string(job.work.Body) != body || job.work.Cookie != "narolink="+inner {
-			t.Error("follow-up payload was changed before forwarding to the desktop")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("follow-up with an image did not reach the desktop")
-	}
-	<-done
-	if response.Code != http.StatusNoContent {
-		t.Fatalf("unexpected status %d: %s", response.Code, response.Body)
-	}
-}
-
-func TestDeviceKeyPreventsCrossDevicePollingAndAnswers(t *testing.T) {
-	r := gatewayForTest(t)
-	firstKey := sha256.Sum256([]byte("first device"))
-	secondKey := sha256.Sum256([]byte("second device"))
-	firstDigest := sha256.Sum256(firstKey[:])
-	secondDigest := sha256.Sum256(secondKey[:])
-	first := hex.EncodeToString(firstDigest[:16])
-	second := hex.EncodeToString(secondDigest[:16])
-	request := func(id string, key [32]byte, route, body string) int {
-		t.Helper()
-		url := testOrigin + "/relay/devices/" + id + "/" + route
-		req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+strings.Repeat("x", 64))
-		req.Header.Set("X-Naro-Device-Key", hex.EncodeToString(key[:]))
-		response := httptest.NewRecorder()
-		r.ServeHTTP(response, req)
-		return response.Code
-	}
-	if request(first, firstKey, "hello", `{"name":"A"}`) != http.StatusNoContent ||
-		request(second, secondKey, "hello", `{"name":"B"}`) != http.StatusNoContent {
-		t.Fatal("could not register both devices")
-	}
-	if request(first, secondKey, "poll", "") != http.StatusForbidden {
-		t.Fatal("second device could poll the first device's queue")
-	}
-	jobID := strings.Repeat("a", 32)
-	job := &waiting{reply: make(chan answer, 1)}
-	r.findDevice(first).waiting[jobID] = job
-	if request(second, secondKey, "answer/"+jobID, `{"status":204}`) != http.StatusNotFound ||
-		request(first, secondKey, "answer/"+jobID, `{"status":204}`) != http.StatusForbidden ||
-		request(first, firstKey, "answer/"+jobID, `{"status":204}`) != http.StatusNoContent || len(job.reply) != 1 {
-		t.Fatal("reply was not confined to its owning device")
-	}
-}
-
 type testWSClient struct {
 	conn net.Conn
 	br   *bufio.Reader
@@ -329,11 +202,34 @@ func testDeviceIdentity(seed string) (string, [32]byte) {
 	return hex.EncodeToString(digest[:16]), key
 }
 
-func TestWSHandshakeAuthAndUpgradeRequired(t *testing.T) {
+func TestAnonymousUploadDoesNotReachDesktop(t *testing.T) {
+	_, srv, token := liveRelayForTest(t)
+	devID, devKey := testDeviceIdentity("anon-device")
+	ws, _ := dialTestWS(t, srv.URL, token, devID, devKey, "主机")
+	defer ws.close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/devices/"+devID+"/api/runs", strings.NewReader("{}"))
+	req.Header.Set("Origin", srv.URL)
+	req.AddCookie(&http.Cookie{Name: scopedCookie, Value: "forged"})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for forged cookie, got %d", resp.StatusCode)
+	}
+	_ = ws.conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+	var hdr [2]byte
+	if _, err := io.ReadFull(ws.br, hdr[:]); err == nil {
+		t.Fatal("unpaired request reached desktop WSS session")
+	}
+}
+
+func TestWSHandshakeAuthUpgradeAndLegacyEndpointsRemoved(t *testing.T) {
 	r, srv, token := liveRelayForTest(t)
 	devID, devKey := testDeviceIdentity("auth-device")
-	wrongID, wrongKey := testDeviceIdentity("other-device")
-	_ = wrongID
+	_, wrongKey := testDeviceIdentity("other-device")
 
 	// Wrong bearer -> 401
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/relay/devices/"+devID+"/ws", nil)
@@ -354,6 +250,25 @@ func TestWSHandshakeAuthAndUpgradeRequired(t *testing.T) {
 		t.Fatalf("expected 403, got err=%v resp=%v", err, resp)
 	}
 	resp.Body.Close()
+
+	// Legacy long-polling routes must return 404 even with valid auth
+	for _, route := range []string{
+		"/relay/hello",
+		"/relay/poll",
+		"/relay/devices/" + devID + "/hello",
+		"/relay/devices/" + devID + "/poll",
+		"/relay/devices/" + devID + "/answer/" + strings.Repeat("a", 32),
+		"/relay/devices/" + devID + "/stream/" + strings.Repeat("a", 32),
+	} {
+		legacyReq, _ := http.NewRequest(http.MethodPost, srv.URL+route, strings.NewReader("{}"))
+		legacyReq.Header.Set("Authorization", "Bearer "+token)
+		legacyReq.Header.Set("X-Naro-Device-Key", hex.EncodeToString(devKey[:]))
+		legacyResp, err := http.DefaultClient.Do(legacyReq)
+		if err != nil || legacyResp.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected 404 for removed legacy route %s, got err=%v resp=%v", route, err, legacyResp)
+		}
+		legacyResp.Body.Close()
+	}
 
 	// Plain GET without Upgrade headers -> 426 + X-Naro-Relay-WS: 1
 	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/relay/devices/"+devID+"/ws", nil)
@@ -394,7 +309,6 @@ func TestWSMultiplexingStopDuringStreamAndAttachments(t *testing.T) {
 	ws, _ := dialTestWS(t, srv.URL, token, devID, devKey, "多路电脑")
 	defer ws.close()
 
-	// Simulated desktop WS dispatcher handling concurrent requests & SSE stream.
 	streamStop := make(chan struct{}, 1)
 	streamStarted := make(chan struct{}, 1)
 	var receivedUploadSize int
@@ -473,8 +387,8 @@ func TestWSMultiplexingStopDuringStreamAndAttachments(t *testing.T) {
 	}
 	cookies := pairResp.Cookies()
 	pairResp.Body.Close()
-	if len(cookies) != 1 || cookies[0].Name != scopedCookie {
-		t.Fatalf("expected scoped cookie, got %+v", cookies)
+	if len(cookies) != 1 || cookies[0].Name != scopedCookie || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("expected scoped HttpOnly Strict cookie, got %+v", cookies)
 	}
 	cookie := cookies[0]
 
@@ -517,7 +431,6 @@ func TestWSMultiplexingStopDuringStreamAndAttachments(t *testing.T) {
 	}
 	stopResp.Body.Close()
 
-	// Verify SSE receives both initial running event and final stopped event, then EOF.
 	sseData, err := io.ReadAll(sseResp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -547,7 +460,6 @@ func TestWSDisconnectCleansUpWaitingWithoutRequeue(t *testing.T) {
 				var msg wsTextMsg
 				if json.Unmarshal(payload, &msg) == nil && msg.Type == "req_start" {
 					gotReq <- msg.ID
-					// Drop connection without replying to simulate mid-request disconnect!
 					ws1.close()
 					return
 				}
@@ -574,7 +486,6 @@ func TestWSDisconnectCleansUpWaitingWithoutRequeue(t *testing.T) {
 		t.Fatalf("waiting request did not fail promptly on disconnect: %v", elapsed)
 	}
 
-	// Reconnect a new WSS session and confirm the aborted POST is NEVER re-dispatched.
 	ws2, _ := dialTestWS(t, srv.URL, token, devID, devKey, "断线电脑")
 	defer ws2.close()
 	_ = ws2.conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
@@ -593,7 +504,6 @@ func TestWSPerDeviceConcurrencyDoesNotStarveOtherDevices(t *testing.T) {
 	wsB, _ := dialTestWS(t, srv.URL, token, idB, keyB, "正常电脑")
 	defer wsB.close()
 
-	// Device A holds all requests without replying; Device B replies immediately.
 	go func() {
 		for {
 			if _, _, err := wsA.readFrame(); err != nil {
@@ -633,7 +543,6 @@ func TestWSPerDeviceConcurrencyDoesNotStarveOtherDevices(t *testing.T) {
 			}
 		}()
 	}
-	// Wait until Device A's per-device slots are full.
 	deadline := time.Now().Add(3 * time.Second)
 	for len(r.findDevice(idA).slots) < deviceSlotsLimit && time.Now().Before(deadline) {
 		time.Sleep(15 * time.Millisecond)
@@ -642,7 +551,6 @@ func TestWSPerDeviceConcurrencyDoesNotStarveOtherDevices(t *testing.T) {
 		t.Fatalf("expected Device A slots full (%d), got %d", deviceSlotsLimit, len(r.findDevice(idA).slots))
 	}
 
-	// 9th request to Device A must get 503 immediately.
 	reqA, _ := http.NewRequest(http.MethodGet, srv.URL+"/devices/"+idA+"/api/activity", nil)
 	reqA.AddCookie(cookieA)
 	respA, err := http.DefaultClient.Do(reqA)
@@ -651,7 +559,6 @@ func TestWSPerDeviceConcurrencyDoesNotStarveOtherDevices(t *testing.T) {
 	}
 	respA.Body.Close()
 
-	// Device B must still succeed immediately!
 	reqB, _ := http.NewRequest(http.MethodGet, srv.URL+"/devices/"+idB+"/api/activity", nil)
 	reqB.AddCookie(cookieB)
 	respB, err := http.DefaultClient.Do(reqB)
@@ -673,7 +580,6 @@ func TestWSSingleConnectionPerDeviceAndIdlePingPong(t *testing.T) {
 	if got := r.activeWSCount(); got != count {
 		t.Fatalf("expected %d active WSS connections, got %d", count, got)
 	}
-	// Verify each idle client receives Pong for Ping.
 	for i, c := range clients {
 		ping := []byte(fmt.Sprintf("p%d", i))
 		if err := c.writeMasked(wsOpPing, ping); err != nil {
@@ -684,7 +590,6 @@ func TestWSSingleConnectionPerDeviceAndIdlePingPong(t *testing.T) {
 			t.Fatalf("pong %d mismatch: op=%d payload=%q err=%v", i, op, string(payload), err)
 		}
 	}
-	// Reconnecting device 0 must replace its old connection, keeping activeWSCount == count.
 	id0, key0 := testDeviceIdentity("idle-host-0")
 	replacement, _ := dialTestWS(t, srv.URL, token, id0, key0, "Idle-0-reconnected")
 	defer replacement.close()
@@ -726,7 +631,6 @@ func TestWSSlowStreamBufferLimitProtectsOtherRequests(t *testing.T) {
 				if msg.Stream {
 					ws.writeJSON(t, wsTextMsg{Type: "stream_start", ID: msg.ID, ContentType: "text/event-stream"})
 					streamOpened <- struct{}{}
-					// Blast enough data to saturate loopback socket buffers + wsStreamWindow (256 KiB) without waiting for ack.
 					bigChunk := bytes.Repeat([]byte("a"), 32*1024)
 					go func(id string) {
 						for range 160 {
@@ -752,7 +656,6 @@ func TestWSSlowStreamBufferLimitProtectsOtherRequests(t *testing.T) {
 	inner := fmt.Sprintf("%d.nonce.sig", time.Now().Add(time.Hour).Unix())
 	cookie := &http.Cookie{Name: scopedCookie, Value: dev.wrap(inner, "/devices/"+devID+"/")}
 
-	// Open SSE stream over raw TCP and deliberately do NOT read the response body.
 	u, _ := url.Parse(srv.URL)
 	rawConn, err := net.DialTimeout("tcp", u.Host, 3*time.Second)
 	if err != nil {
@@ -763,8 +666,6 @@ func TestWSSlowStreamBufferLimitProtectsOtherRequests(t *testing.T) {
 		devID, u.Host, scopedCookie, cookie.Value)
 	<-streamOpened
 
-	// Relay must protect itself from the overflowing stream by sending req_cancel
-	// AND must still handle normal requests on the same WSS connection immediately!
 	select {
 	case <-gotCancel:
 	case <-time.After(3 * time.Second):
@@ -780,95 +681,61 @@ func TestWSSlowStreamBufferLimitProtectsOtherRequests(t *testing.T) {
 	fastResp.Body.Close()
 }
 
-func TestWSAndLegacyDesktopCoexistAndIsolate(t *testing.T) {
+func TestWSMultiDeviceCookieIsolation(t *testing.T) {
 	r, srv, token := liveRelayForTest(t)
-	wsID, wsKey := testDeviceIdentity("new-ws-desktop")
-	oldID, oldKey := testDeviceIdentity("old-poll-desktop")
+	id1, key1 := testDeviceIdentity("ws-device-1")
+	id2, key2 := testDeviceIdentity("ws-device-2")
 
-	wsClient, _ := dialTestWS(t, srv.URL, token, wsID, wsKey, "新版WSS电脑")
-	defer wsClient.close()
+	ws1, _ := dialTestWS(t, srv.URL, token, id1, key1, "电脑 1")
+	defer ws1.close()
+	ws2, _ := dialTestWS(t, srv.URL, token, id2, key2, "电脑 2")
+	defer ws2.close()
 
-	go func() {
+	respond := func(c *testWSClient, body string) {
 		for {
-			op, payload, err := wsClient.readFrame()
+			op, payload, err := c.readFrame()
 			if err != nil {
 				return
 			}
 			if op == wsOpText {
 				var msg wsTextMsg
 				if json.Unmarshal(payload, &msg) == nil && msg.Type == "req_start" {
-					wsClient.writeJSON(t, wsTextMsg{Type: "res_start", ID: msg.ID, Status: 200, ContentType: "application/json", EOF: false})
-					_ = wsClient.writeBin(wsBinResChunk, wsBinFlagEOF, msg.ID, []byte(`{"mode":"ws"}`))
+					c.writeJSON(t, wsTextMsg{Type: "res_start", ID: msg.ID, Status: 200, ContentType: "application/json", EOF: false})
+					_ = c.writeBin(wsBinResChunk, wsBinFlagEOF, msg.ID, []byte(body))
 				}
 			}
 		}
-	}()
-
-	// Register old desktop via legacy hello + poll + answer.
-	helloReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/relay/devices/"+oldID+"/hello", strings.NewReader(`{"name":"旧版轮询电脑","streaming":true}`))
-	helloReq.Header.Set("Authorization", "Bearer "+token)
-	helloReq.Header.Set("X-Naro-Device-Key", hex.EncodeToString(oldKey[:]))
-	helloResp, err := http.DefaultClient.Do(helloReq)
-	if err != nil || helloResp.StatusCode != http.StatusNoContent {
-		t.Fatalf("legacy hello failed: err=%v resp=%v", err, helloResp)
 	}
-	helloResp.Body.Close()
-
-	legacyDone := make(chan struct{})
-	go func() {
-		defer close(legacyDone)
-		pollReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/relay/devices/"+oldID+"/poll", nil)
-		pollReq.Header.Set("Authorization", "Bearer "+token)
-		pollReq.Header.Set("X-Naro-Device-Key", hex.EncodeToString(oldKey[:]))
-		pollResp, err := http.DefaultClient.Do(pollReq)
-		if err != nil || pollResp.StatusCode != http.StatusOK {
-			return
-		}
-		var work command
-		_ = json.NewDecoder(pollResp.Body).Decode(&work)
-		pollResp.Body.Close()
-		ansBody := fmt.Sprintf(`{"status":200,"content_type":"application/json","body":%q}`,
-			base64.StdEncoding.EncodeToString([]byte(`{"mode":"poll"}`)))
-		ansReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/relay/devices/"+oldID+"/answer/"+work.ID, strings.NewReader(ansBody))
-		ansReq.Header.Set("Authorization", "Bearer "+token)
-		ansReq.Header.Set("X-Naro-Device-Key", hex.EncodeToString(oldKey[:]))
-		if ansResp, err := http.DefaultClient.Do(ansReq); err == nil {
-			ansResp.Body.Close()
-		}
-	}()
+	go respond(ws1, `{"host":1}`)
+	go respond(ws2, `{"host":2}`)
 
 	inner := fmt.Sprintf("%d.nonce.sig", time.Now().Add(time.Hour).Unix())
-	wsCookie := &http.Cookie{Name: scopedCookie, Value: r.findDevice(wsID).wrap(inner, "/devices/"+wsID+"/")}
-	oldCookie := &http.Cookie{Name: scopedCookie, Value: r.findDevice(oldID).wrap(inner, "/devices/"+oldID+"/")}
+	cookie1 := &http.Cookie{Name: scopedCookie, Value: r.findDevice(id1).wrap(inner, "/devices/"+id1+"/")}
+	cookie2 := &http.Cookie{Name: scopedCookie, Value: r.findDevice(id2).wrap(inner, "/devices/"+id2+"/")}
 
-	req1, _ := http.NewRequest(http.MethodGet, srv.URL+"/devices/"+wsID+"/api/activity", nil)
-	req1.AddCookie(wsCookie)
-	resp1, err := http.DefaultClient.Do(req1)
-	if err != nil || resp1.StatusCode != 200 {
-		t.Fatalf("ws device request failed: err=%v resp=%v", err, resp1)
-	}
-	body1, _ := io.ReadAll(resp1.Body)
-	resp1.Body.Close()
-	if string(body1) != `{"mode":"ws"}` {
-		t.Fatalf("unexpected ws body: %s", string(body1))
+	for _, tc := range []struct {
+		id     string
+		cookie *http.Cookie
+		want   string
+	}{
+		{id1, cookie1, `{"host":1}`},
+		{id2, cookie2, `{"host":2}`},
+	} {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/devices/"+tc.id+"/api/activity", nil)
+		req.AddCookie(tc.cookie)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("device %s request failed: err=%v resp=%v", tc.id, err, resp)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(body) != tc.want {
+			t.Fatalf("device %s body mismatch: got %s want %s", tc.id, string(body), tc.want)
+		}
 	}
 
-	req2, _ := http.NewRequest(http.MethodGet, srv.URL+"/devices/"+oldID+"/api/activity", nil)
-	req2.AddCookie(oldCookie)
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil || resp2.StatusCode != 200 {
-		t.Fatalf("legacy device request failed: err=%v resp=%v", err, resp2)
-	}
-	body2, _ := io.ReadAll(resp2.Body)
-	resp2.Body.Close()
-	if string(body2) != `{"mode":"poll"}` {
-		t.Fatalf("unexpected legacy body: %s", string(body2))
-	}
-	<-legacyDone
-
-	// Cross-device cookie must be rejected with 401.
-	crossReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/devices/"+oldID+"/api/activity", nil)
-	crossReq.AddCookie(wsCookie)
+	crossReq, _ := http.NewRequest(http.MethodGet, srv.URL+"/devices/"+id2+"/api/activity", nil)
+	crossReq.AddCookie(cookie1)
 	crossResp, err := http.DefaultClient.Do(crossReq)
 	if err != nil || crossResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for cross-device cookie, got err=%v resp=%v", err, crossResp)
