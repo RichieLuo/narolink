@@ -1,7 +1,20 @@
 use super::*;
 
 pub(super) fn inventory() -> Result<Vec<Session>, String> {
-    let path = current_workspace().join(".gemini/antigravity-cli/conversation_summaries.db");
+    let mut sessions = store_inventory("antigravity-cli")?;
+    for session in store_inventory("antigravity")? {
+        if !sessions.iter().any(|existing| existing.id == session.id) {
+            sessions.push(session);
+        }
+    }
+    Ok(sessions)
+}
+
+fn store_inventory(store: &str) -> Result<Vec<Session>, String> {
+    let path = std::env::var_os("ANTIGRAVITY_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| current_workspace().join(".gemini").join(store))
+        .join("conversation_summaries.db");
     if !path.is_file() {
         return Ok(vec![]);
     }
@@ -36,17 +49,23 @@ pub(super) fn inventory() -> Result<Vec<Session>, String> {
             }
             let workspaces: Vec<String> = serde_json::from_str(paths.as_deref()?).ok()?;
             let cwd = workspaces.iter().find_map(|path| parse_path(path))?;
+            let title = title
+                .as_deref()
+                .map(|title| short(title, 150))
+                .filter(|title| !title.is_empty());
             Some(Session {
                 provider: Provider::Antigravity,
                 id,
                 cwd,
+                project_id: None,
+                model: None,
+                named: title.is_some(),
                 title: title
-                    .filter(|label| !label.trim().is_empty())
-                    .map(|label| short(&label, 150))
                     .or_else(|| preview.as_deref().map(|label| short(label, 150)))
                     .unwrap_or_else(|| "Antigravity 会话".into()),
                 preview: preview.map(|label| short(&label, 300)),
                 updated: updated.unwrap_or_default(),
+                rollout: None,
             })
         })
         .collect())

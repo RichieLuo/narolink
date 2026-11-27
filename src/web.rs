@@ -1,9 +1,14 @@
 mod auth;
 mod remote;
+mod reply;
+mod stream;
 
 use crate::{
-    engine::{Inventory, Model, Provider, Session, Transcript, TurnRequest},
-    service::{Activity, RunSummary, Service, Snapshot},
+    engine::{
+        self, Inventory, Message, Model, ModelCatalog, Provider, QuestionAnswers, Quota, Role,
+        Session, Transcript, TurnRequest, usage::UsageReport, work::Work,
+    },
+    service::{Activity, FollowUpRequest, PermissionTarget, RunSummary, Service, Snapshot},
 };
 use auth::Auth;
 use axum::{
@@ -14,6 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -59,6 +65,7 @@ struct Web {
     service: Service,
     auth: Arc<Auth>,
     remote: remote::Remote,
+    previews: Arc<reply::Previews>,
     local: String,
 }
 
@@ -68,13 +75,13 @@ pub struct Gateway {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+pub use remote::device_url;
+
 impl Gateway {
     pub fn start(service: Service, options: Options) -> Result<Self, String> {
         let auth = Arc::new(Auth::load()?);
         let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, options.port))
-            .map_err(|error| {
-                format!("无法启动 NaroLink 网页服务。请检查是否已经打开。\n{error}")
-            })?;
+            .map_err(|error| format!("无法启动 Naro 网页服务。请检查是否已经打开。\n{error}"))?;
         listener
             .set_nonblocking(true)
             .map_err(|error| error.to_string())?;
@@ -86,10 +93,13 @@ impl Gateway {
             .build()
             .map_err(|error| error.to_string())?;
         let local = format!("http://{address}");
+        let remote =
+            remote::Remote::new(local.clone(), options.public_url, auth.relay_device_key());
         let web = Web {
             service,
             auth,
-            remote: remote::Remote::new(local.clone(), options.public_url),
+            remote,
+            previews: Arc::new(reply::Previews::new()),
             local,
         };
         let listener = {
@@ -166,6 +176,42 @@ fn routes(web: Web) -> Router {
             }),
         )
         .route(
+            "/theme.js",
+            get(|| async {
+                asset(
+                    "text/javascript; charset=utf-8",
+                    include_bytes!("../public/theme.js"),
+                )
+            }),
+        )
+        .route(
+            "/qr-worker.js",
+            get(|| async {
+                asset(
+                    "text/javascript; charset=utf-8",
+                    include_bytes!("../public/qr-worker.js"),
+                )
+            }),
+        )
+        .route(
+            "/vendor/jsqr.js",
+            get(|| async {
+                asset(
+                    "text/javascript; charset=utf-8",
+                    include_bytes!("../public/vendor/jsqr.js"),
+                )
+            }),
+        )
+        .route(
+            "/i18n.json",
+            get(|| async {
+                asset(
+                    "application/json; charset=utf-8",
+                    include_bytes!("../public/i18n.json"),
+                )
+            }),
+        )
+        .route(
             "/style.css",
             get(|| async {
                 asset(
@@ -209,14 +255,45 @@ fn routes(web: Web) -> Router {
         .route("/api/pair", post(pair))
         .route("/api/logout", post(logout))
         .route("/api/sessions/{provider}", get(sessions))
+        .route("/api/search/{provider}", get(search_sessions))
+        .route(
+            "/api/sessions/{provider}/{id}/actions",
+            post(session_action),
+        )
+        .route(
+            "/api/sessions/{provider}/{id}/occurrences",
+            get(search_occurrences),
+        )
         .route("/api/sessions/{provider}/{id}", get(transcript))
+        .route("/api/previews/{key}", get(preview))
         .route("/api/models/{provider}", get(models))
+        .route(
+            "/api/permissions/{provider}",
+            get(permission_mode).post(save_permission_mode),
+        )
+        .route("/api/quotas/{provider}", get(quota))
+        .route("/api/quotas/codex/reset", post(reset_codex_quota))
+        .route("/api/usage", get(token_usage))
         .route("/api/runs", get(running).post(start_turn))
         .route("/api/runs/{id}", get(turn))
+        .route("/api/runs/{id}/events", get(stream::events))
+        .route("/api/runs/{id}/messages", post(follow_up))
+        .route(
+            "/api/runs/{id}/messages/{message_id}/withdraw",
+            post(withdraw_queued),
+        )
+        .route(
+            "/api/runs/{id}/messages/{message_id}/steer",
+            post(steer_queued),
+        )
         .route("/api/runs/{id}/images/{index}", get(image))
         .route("/api/runs/{id}/stop", post(stop_turn))
         .route("/api/runs/{id}/approval", post(approve))
         .layer(DefaultBodyLimit::max(18 * 1024 * 1024))
+        .route(
+            "/api/runs/{id}/answer",
+            post(answer).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .layer(middleware::from_fn_with_state(web.clone(), guard))
         .with_state(web)
 }
@@ -292,7 +369,7 @@ async fn guard(State(web): State<Web>, request: Request, next: Next) -> Response
         HeaderValue::from_static("no-referrer"),
     );
     headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static(
-        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; \
+        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; \
          manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     ));
     headers.insert(
@@ -355,40 +432,226 @@ async fn sessions(
     blocking(move || web.service.inventory(provider, query.refresh)).await
 }
 
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: String,
+    #[serde(default)]
+    archived: bool,
+    cursor: Option<String>,
+}
+
+async fn search_sessions(
+    Path(provider): Path<Provider>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Value>, ApiError> {
+    blocking(move || engine::search(provider, &query.q, query.archived, query.cursor.as_deref()))
+        .await
+}
+
+async fn search_occurrences(
+    State(web): State<Web>,
+    Path((provider, id)): Path<(Provider, String)>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Value>, ApiError> {
+    blocking(move || {
+        let session = web.service.session(provider, &id)?;
+        engine::occurrences(&session, &query.q, query.cursor.as_deref())
+    })
+    .await
+}
+
+async fn session_action(
+    State(web): State<Web>,
+    Path((provider, id)): Path<(Provider, String)>,
+    Json(action): Json<engine::SessionAction>,
+) -> Result<Json<Value>, ApiError> {
+    blocking(move || {
+        let session = web.service.session(provider, &id)?;
+        web.service.session_action(&session, &action)
+    })
+    .await
+}
+
+async fn quota(Path(provider): Path<Provider>) -> Result<Json<Quota>, ApiError> {
+    blocking(move || engine::quota(provider)).await
+}
+
+async fn token_usage(State(web): State<Web>) -> Result<Json<UsageReport>, ApiError> {
+    blocking(move || Ok(web.service.token_usage())).await
+}
+
+#[derive(Deserialize)]
+struct QuotaResetRequest {
+    idempotency_key: String,
+}
+
+#[derive(Serialize)]
+struct QuotaResetResponse {
+    outcome: engine::CodexQuotaResetOutcome,
+    message: &'static str,
+}
+
+async fn reset_codex_quota(
+    Json(request): Json<QuotaResetRequest>,
+) -> Result<Json<QuotaResetResponse>, ApiError> {
+    let idempotency_key = uuid::Uuid::parse_str(&request.idempotency_key)
+        .ok()
+        .filter(|key| !key.is_nil())
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "无效的重置请求标识。".into()))?;
+    blocking(move || {
+        let outcome = engine::reset_codex_quota(idempotency_key)?;
+        Ok(QuotaResetResponse {
+            outcome,
+            message: outcome.message(),
+        })
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ModelQuery {
+    #[serde(default)]
+    refresh: bool,
+    #[serde(default)]
+    settings: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ModelListing {
+    Models(Vec<Model>),
+    Catalog(ModelCatalog),
+}
+
 async fn models(
     State(web): State<Web>,
     Path(provider): Path<Provider>,
-    Query(query): Query<Refresh>,
-) -> Result<Json<Vec<Model>>, ApiError> {
-    blocking(move || web.service.models(provider, query.refresh)).await
+    Query(query): Query<ModelQuery>,
+) -> Result<Json<ModelListing>, ApiError> {
+    blocking(move || {
+        let catalog = web.service.models(provider, query.refresh)?;
+        Ok(if query.settings {
+            ModelListing::Catalog(catalog)
+        } else {
+            ModelListing::Models(catalog.models)
+        })
+    })
+    .await
+}
+
+async fn permission_mode(
+    State(web): State<Web>,
+    Path(provider): Path<Provider>,
+    Query(target): Query<PermissionTarget>,
+) -> Result<Json<Option<String>>, ApiError> {
+    blocking(move || web.service.permission_mode(provider, &target)).await
+}
+
+#[derive(Deserialize)]
+struct PermissionSelection {
+    #[serde(flatten)]
+    target: PermissionTarget,
+    permission_mode: Option<String>,
+}
+
+async fn save_permission_mode(
+    State(web): State<Web>,
+    Path(provider): Path<Provider>,
+    Json(selection): Json<PermissionSelection>,
+) -> Result<Json<()>, ApiError> {
+    blocking(move || {
+        web.service.save_permission_mode(
+            provider,
+            &selection.target,
+            selection.permission_mode.as_deref(),
+        )
+    })
+    .await
 }
 
 #[derive(Serialize)]
 struct History {
     session: Session,
-    transcript: Transcript,
+    transcript: Option<WebTranscript>,
     active: Option<RunSummary>,
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    #[serde(default)]
+    refresh: bool,
+    since: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WebTranscript {
+    messages: Vec<WebMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    warning: Option<String>,
+    revision: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WebMessage {
+    #[serde(flatten)]
+    message: Message,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rendered: Option<reply::Rendered>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<reply::AttachmentPreview>,
 }
 
 async fn transcript(
     State(web): State<Web>,
     Path((provider, id)): Path<(Provider, String)>,
-    Query(query): Query<Refresh>,
+    Query(query): Query<HistoryQuery>,
 ) -> Result<Json<History>, ApiError> {
     blocking(move || {
         let session = web.service.session(provider, &id)?;
-        let transcript = web
-            .service
-            .transcript(&session, query.refresh)
-            .unwrap_or_else(|warning| Transcript {
-                messages: vec![],
-                warning: Some(warning),
-            });
         let active = web
             .service
             .running()
             .into_iter()
             .find(|run| run.provider == provider && run.session_id.as_deref() == Some(&id));
+        let transcript = if !query.refresh
+            && query.since.is_some()
+            && query.since == web.previews.revision(session.revision())
+        {
+            None
+        } else {
+            let history = web
+                .service
+                .transcript(&session, query.refresh)
+                .unwrap_or_else(|warning| Transcript {
+                    warning: Some(warning),
+                    ..Transcript::default()
+                });
+            let renderer = web.previews.for_workspace(&session.cwd);
+            Some(WebTranscript {
+                messages: history
+                    .messages
+                    .into_iter()
+                    .map(|message| {
+                        let rendered = (message.role == Role::Assistant)
+                            .then(|| renderer.render_reply(&message.text, &message.work));
+                        let attachments = message
+                            .attachments
+                            .iter()
+                            .map(|attachment| web.previews.user_attachment(attachment))
+                            .collect();
+                        WebMessage {
+                            message,
+                            rendered,
+                            attachments,
+                        }
+                    })
+                    .collect(),
+                model: history.model,
+                warning: history.warning,
+                revision: web.previews.revision(history.revision),
+            })
+        };
         Ok(History {
             session,
             transcript,
@@ -413,10 +676,99 @@ async fn running(State(web): State<Web>) -> Json<Vec<RunSummary>> {
     Json(web.service.running())
 }
 
-async fn turn(State(web): State<Web>, Path(id): Path<String>) -> Result<Json<Snapshot>, ApiError> {
-    Ok(Json(
-        web.service.run(&id).map_err(ApiError::missing)?.snapshot(),
-    ))
+#[derive(Serialize)]
+struct LiveSnapshot {
+    #[serde(flatten)]
+    snapshot: Snapshot,
+    replies: Vec<LiveReply>,
+}
+
+#[derive(Serialize)]
+struct LiveReply {
+    after: Option<String>,
+    text: String,
+    work: Work,
+    rendered: reply::Rendered,
+}
+
+async fn turn(
+    State(web): State<Web>,
+    Path(id): Path<String>,
+) -> Result<Json<LiveSnapshot>, ApiError> {
+    let run = web.service.run(&id).map_err(ApiError::missing)?;
+    blocking(move || Ok(live_snapshot(&web, run.cwd(), run.snapshot()))).await
+}
+
+fn live_snapshot(web: &Web, cwd: &std::path::Path, snapshot: Snapshot) -> LiveSnapshot {
+    let renderer = web.previews.for_workspace(cwd);
+    let replies = snapshot
+        .replies()
+        .into_iter()
+        .filter(|reply| !reply.text.is_empty() || !reply.work.is_empty())
+        .map(|reply| {
+            let rendered = renderer.render_reply(&reply.text, reply.work);
+            LiveReply {
+                after: reply.after.map(str::to_owned),
+                text: reply.text.into_owned(),
+                work: reply.work.clone(),
+                rendered,
+            }
+        })
+        .collect();
+    LiveSnapshot { snapshot, replies }
+}
+
+async fn follow_up(
+    State(web): State<Web>,
+    Path(id): Path<String>,
+    Json(request): Json<FollowUpRequest>,
+) -> Result<StatusCode, ApiError> {
+    let run = web.service.run(&id).map_err(ApiError::missing)?;
+    let _ = blocking(move || run.follow_up(request)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn steer_queued(
+    State(web): State<Web>,
+    Path((id, message_id)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let run = web.service.run(&id).map_err(ApiError::missing)?;
+    run.steer_queued(&message_id)
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+struct WithdrawnMessage {
+    prompt: String,
+    images: Vec<WithdrawnImage>,
+}
+
+#[derive(Serialize)]
+struct WithdrawnImage {
+    name: String,
+    data: String,
+}
+
+async fn withdraw_queued(
+    State(web): State<Web>,
+    Path((id, message_id)): Path<(String, String)>,
+) -> Result<Json<WithdrawnMessage>, ApiError> {
+    let run = web.service.run(&id).map_err(ApiError::missing)?;
+    let draft = run
+        .withdraw_queued(&message_id, false)
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error))?;
+    Ok(Json(WithdrawnMessage {
+        prompt: draft.prompt,
+        images: draft
+            .images
+            .iter()
+            .map(|image| WithdrawnImage {
+                name: image.name().to_owned(),
+                data: STANDARD.encode(image.png_bytes()),
+            })
+            .collect(),
+    }))
 }
 
 async fn image(
@@ -433,6 +785,19 @@ async fn image(
     )
         .into_response())
 }
+async fn preview(State(web): State<Web>, Path(key): Path<String>) -> Result<Response, ApiError> {
+    let image = tokio::task::spawn_blocking(move || web.previews.image(&key))
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| ApiError::missing("原图不存在或暂时无法预览".into()))?;
+    Ok((
+        [(header::CONTENT_TYPE, image.media_type())],
+        image.png_bytes().to_vec(),
+    )
+        .into_response())
+}
+
 async fn stop_turn(State(web): State<Web>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
     web.service.run(&id).map_err(ApiError::missing)?.stop();
     Ok(StatusCode::NO_CONTENT)
@@ -451,6 +816,23 @@ async fn approve(
 ) -> Result<StatusCode, ApiError> {
     let run = web.service.run(&id).map_err(ApiError::missing)?;
     run.approve(&decision.approval_id, decision.allow)
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct AnswerRequest {
+    question_id: String,
+    answers: QuestionAnswers,
+}
+
+async fn answer(
+    State(web): State<Web>,
+    Path(id): Path<String>,
+    Json(request): Json<AnswerRequest>,
+) -> Result<StatusCode, ApiError> {
+    let run = web.service.run(&id).map_err(ApiError::missing)?;
+    run.answer(&request.question_id, request.answers)
         .map_err(|error| ApiError(StatusCode::CONFLICT, error))?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -3,9 +3,9 @@ fn main() {
     #[cfg(windows)]
     winres::WindowsResource::new()
         .set_icon("assets/narolink.ico")
-        .set("ProductName", "NaroLink")
-        .set("FileDescription", "NaroLink")
-        .set("OriginalFilename", "NaroLink.exe")
+        .set("ProductName", "Naro")
+        .set("FileDescription", "Naro")
+        .set("OriginalFilename", "Naro.exe")
         .compile()
-        .expect("embed the NaroLink icon");
+        .expect("embed the Naro icon");
 }

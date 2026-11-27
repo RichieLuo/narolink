@@ -4,7 +4,6 @@ use sha2::Sha256;
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant, SystemTime},
 };
@@ -19,13 +18,7 @@ pub(super) struct Auth {
 
 impl Auth {
     pub fn load() -> Result<Self, String> {
-        let root = std::env::var_os("NAROLINK_STATE_DIR")
-            .map(PathBuf::from)
-            .or_else(|| {
-                directories::ProjectDirs::from("", "", "NaroLink")
-                    .map(|dirs| dirs.data_local_dir().to_owned())
-            })
-            .ok_or("无法定位 NaroLink 的本机数据目录")?;
+        let root = crate::settings::state_dir()?;
         fs::create_dir_all(&root).map_err(|error| error.to_string())?;
         let file = root.join("pairing.key");
         let key = match fs::read(&file) {
@@ -52,7 +45,7 @@ impl Auth {
             Err(error) => return Err(error.to_string()),
         };
         Ok(Self {
-            key: key.try_into().map_err(|_| "NaroLink 配对密钥格式无效")?,
+            key: key.try_into().map_err(|_| "Naro 配对密钥格式无效")?,
             attempts: Mutex::new((Instant::now(), 0)),
         })
     }
@@ -62,6 +55,13 @@ impl Auth {
             Hmac::<Sha256>::new_from_slice(&self.key).expect("HMAC accepts a 32-byte key");
         mac.update(input.as_bytes());
         mac
+    }
+
+    pub(super) fn relay_device_key(&self) -> [u8; 32] {
+        self.mac("relay-device-key:v1")
+            .finalize()
+            .into_bytes()
+            .into()
     }
 
     fn slot_code(&self, slot: u64) -> String {

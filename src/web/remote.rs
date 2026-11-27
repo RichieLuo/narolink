@@ -1,7 +1,13 @@
 use base64::Engine as _;
-use reqwest::{Method, Url, blocking::Client, header, redirect::Policy};
+use reqwest::{
+    Method, Url,
+    blocking::{Body, Client, RequestBuilder, Response},
+    header,
+    redirect::Policy,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     sync::{
@@ -10,6 +16,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::Semaphore;
 
 const MAX_WIRE: u64 = 24 * 1024 * 1024;
 
@@ -18,6 +25,9 @@ pub struct Remote(Arc<Shared>);
 
 struct Shared {
     local: String,
+    device_id: String,
+    device_key: String,
+    device_name: String,
     state: Mutex<State>,
 }
 
@@ -29,6 +39,7 @@ struct State {
 #[derive(Clone, Default)]
 pub struct Config {
     pub url: Option<String>,
+    pub device_url: Option<String>,
     pub detail: String,
     pub connected: bool,
 }
@@ -42,6 +53,8 @@ struct Work {
     content_type: Option<String>,
     cookie: Option<String>,
     body: Option<Value>,
+    #[serde(default)]
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -53,7 +66,7 @@ struct Answer {
 }
 
 impl Remote {
-    pub fn new(local: String, configured: Option<String>) -> Self {
+    pub fn new(local: String, configured: Option<String>, key: [u8; 32]) -> Self {
         let connected = configured.is_some();
         let detail = if connected {
             "HTTPS 反向代理已配置"
@@ -62,8 +75,12 @@ impl Remote {
         };
         Self(Arc::new(Shared {
             local,
+            device_id: hex(&Sha256::digest(key)[..16]),
+            device_key: hex(&key),
+            device_name: device_name(),
             state: Mutex::new(State {
                 config: Config {
+                    device_url: configured.clone(),
                     url: configured,
                     detail: detail.into(),
                     connected,
@@ -125,17 +142,20 @@ impl Remote {
             }
             state.config = Config {
                 url: Some(origin.clone()),
+                device_url: Some(format!("{origin}/devices/{}/", self.0.device_id)),
                 detail: "正在连接中继服务器…".into(),
                 connected: false,
             };
         }
         let bearer = Arc::<str>::from(token);
+        let streams = Arc::new(Semaphore::new(8));
         for _ in 0..4 {
             let settings = self.clone();
             let url = origin.clone();
             let bearer = bearer.clone();
             let stop = stop.clone();
-            std::thread::spawn(move || settings.worker(&url, &bearer, &stop));
+            let streams = streams.clone();
+            std::thread::spawn(move || settings.worker(&url, &bearer, &stop, &streams));
         }
         Ok(())
     }
@@ -158,15 +178,17 @@ impl Remote {
         }
     }
 
-    fn worker(&self, origin: &str, bearer: &str, stop: &AtomicBool) {
+    fn worker(&self, origin: &str, bearer: &str, stop: &AtomicBool, streams: &Arc<Semaphore>) {
         let build = || {
             Client::builder()
                 .redirect(Policy::none())
                 .connect_timeout(Duration::from_secs(7))
         };
-        let (Ok(relay), Ok(local)) = (
+        let (Ok(relay), Ok(local), Ok(stream_relay), Ok(stream_local)) = (
             build().timeout(Duration::from_secs(30)).build(),
             build().no_proxy().timeout(Duration::from_secs(28)).build(),
+            build().timeout(None).build(),
+            build().no_proxy().timeout(None).build(),
         ) else {
             self.status_for(stop, false, "无法初始化 HTTP 客户端");
             return;
@@ -175,24 +197,26 @@ impl Remote {
             .split_once("://")
             .map(|(_, host)| host)
             .unwrap_or_default();
-        if let Ok(reply) = relay
-            .post(format!("{origin}/relay/hello"))
-            .bearer_auth(bearer)
-            .send()
-        {
-            if reply.status().is_success() {
-                self.status_for(stop, true, "电脑已连接中继，可用 Safari 打开网页");
-            } else if reply.status().as_u16() == 401 {
-                self.status_for(stop, false, "服务器拒绝了连接密钥");
-                stop.store(true, Ordering::Release);
-                return;
-            }
-        }
-        let poll = format!("{origin}/relay/poll");
+        let endpoint = format!("{origin}/relay/devices/{}", self.0.device_id);
+        let request = |client: &Client, operation: &str| {
+            client
+                .post(format!("{endpoint}/{operation}"))
+                .bearer_auth(bearer)
+                .header("X-Naro-Device-Key", &self.0.device_key)
+        };
+        let mut registered = false;
         while !stop.load(Ordering::Acquire) {
-            match relay.post(&poll).bearer_auth(bearer).send() {
+            let response = if registered {
+                request(&relay, "poll").send()
+            } else {
+                request(&relay, "hello")
+                    .json(&json!({"name": &self.0.device_name, "streaming": true}))
+                    .send()
+            };
+            match response {
                 Ok(response) if response.status().is_success() => {
-                    self.status_for(stop, true, "电脑已连接中继，可用 Safari 打开网页");
+                    self.status_for(stop, true, "中继服务器已连接");
+                    registered = true;
                     if response.status().as_u16() == 204 {
                         continue;
                     }
@@ -202,37 +226,60 @@ impl Remote {
                     if stop.load(Ordering::Acquire) {
                         return;
                     }
-                    let answer = self.forward(&local, authority, &work);
-                    let result = format!("{origin}/relay/answer/{}", work.id);
-                    let _ = relay.post(result).bearer_auth(bearer).json(&answer).send();
+                    let reply = request(&relay, &format!("answer/{}", work.id));
+                    if work.stream {
+                        // Keep the ordinary workers free to handle stop and queue requests.
+                        if let Ok(permit) = streams.clone().try_acquire_owned() {
+                            let local = self.local_request(&stream_local, authority, &work);
+                            let upload = request(&stream_relay, &format!("stream/{}", work.id));
+                            let fallback = request(&relay, &format!("answer/{}", work.id));
+                            let task = std::thread::Builder::new().name("naro-reply-stream".into());
+                            if task
+                                .spawn(move || {
+                                    let _permit = permit;
+                                    forward_stream(local, upload, fallback);
+                                })
+                                .is_ok()
+                            {
+                                continue;
+                            }
+                        }
+                        let _ = reply.json(&unavailable()).send();
+                    } else {
+                        let answer = self
+                            .local_request(&local, authority, &work)
+                            .and_then(|request| request.send().map_err(|_| ()))
+                            .and_then(read_answer)
+                            .unwrap_or_else(|()| unavailable());
+                        let _ = reply.json(&answer).send();
+                    }
                     continue;
                 }
-                Ok(response) if response.status().as_u16() == 401 => {
+                Ok(response) if matches!(response.status().as_u16(), 401 | 403) => {
                     self.status_for(stop, false, "服务器拒绝了连接密钥");
                     stop.store(true, Ordering::Release);
                     return;
                 }
-                Ok(_) => self.status_for(stop, false, "服务器未接受连接。检查 NaroLink 中继地址。"),
+                Ok(response) if response.status().as_u16() == 404 => {
+                    if registered {
+                        registered = false;
+                        continue;
+                    }
+                    self.status_for(stop, false, "中继没有设备连接接口，请更新中继版本。");
+                }
+                Ok(_) => self.status_for(stop, false, "服务器未接受连接。检查 Naro 中继地址。"),
                 Err(_) => self.status_for(stop, false, "正在重连。检查服务器地址和 HTTPS。"),
             }
             std::thread::park_timeout(Duration::from_secs(2));
         }
     }
 
-    fn forward(&self, local: &Client, authority: &str, work: &Work) -> Answer {
-        match self.fetch(local, authority, work) {
-            Ok(answer) => answer,
-            Err(()) => Answer {
-                status: 502,
-                content_type: Some("application/json".into()),
-                set_cookie: None,
-                body: base64::engine::general_purpose::STANDARD
-                    .encode(br#"{"error":"NaroLink local API unavailable"}"#),
-            },
-        }
-    }
-
-    fn fetch(&self, local: &Client, authority: &str, work: &Work) -> Result<Answer, ()> {
+    fn local_request(
+        &self,
+        local: &Client,
+        authority: &str,
+        work: &Work,
+    ) -> Result<RequestBuilder, ()> {
         let method = match work.method.as_str() {
             "GET" => Method::GET,
             "HEAD" => Method::HEAD,
@@ -261,35 +308,104 @@ impl Remote {
         if let Some(body) = &work.body {
             request = request.json(body);
         }
-        let response = request.send().map_err(|_| ())?;
-        let status = response.status().as_u16();
-        let header_string = |name| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
-        };
-        let content_type = header_string(header::CONTENT_TYPE);
-        let set_cookie = header_string(header::SET_COOKIE);
-        let mut encoder = base64::write::EncoderWriter::new(
-            Vec::new(),
-            &base64::engine::general_purpose::STANDARD,
-        );
-        let count =
-            std::io::copy(&mut response.take(MAX_WIRE + 1), &mut encoder).map_err(|_| ())?;
-        if count > MAX_WIRE {
-            return Err(());
+        if work.stream {
+            request = request.header(header::ACCEPT, "text/event-stream");
         }
-        encoder.flush().map_err(|_| ())?;
-        let body = String::from_utf8(encoder.finish().map_err(|_| ())?).map_err(|_| ())?;
-        Ok(Answer {
-            status,
-            content_type,
-            set_cookie,
-            body,
-        })
+        Ok(request)
     }
+}
+
+fn forward_stream(
+    local: Result<RequestBuilder, ()>,
+    upload: RequestBuilder,
+    fallback: RequestBuilder,
+) {
+    let response = local.and_then(|request| request.send().map_err(|_| ()));
+    let answer = match response {
+        Ok(response)
+            if response.status().is_success()
+                && response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|value| value == "text/event-stream") =>
+        {
+            if upload
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::new(response))
+                .send()
+                .is_ok_and(|response| response.status().is_success())
+            {
+                return;
+            }
+            unavailable()
+        }
+        Ok(response) => read_answer(response).unwrap_or_else(|()| unavailable()),
+        Err(()) => unavailable(),
+    };
+    let _ = fallback.json(&answer).send();
+}
+
+fn unavailable() -> Answer {
+    Answer {
+        status: 502,
+        content_type: Some("application/json".into()),
+        set_cookie: None,
+        body: base64::engine::general_purpose::STANDARD
+            .encode(br#"{"error":"Naro local API unavailable"}"#),
+    }
+}
+
+fn read_answer(response: Response) -> Result<Answer, ()> {
+    let status = response.status().as_u16();
+    let header_string = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    let content_type = header_string(header::CONTENT_TYPE);
+    let set_cookie = header_string(header::SET_COOKIE);
+    let mut encoder =
+        base64::write::EncoderWriter::new(Vec::new(), &base64::engine::general_purpose::STANDARD);
+    let count = std::io::copy(&mut response.take(MAX_WIRE + 1), &mut encoder).map_err(|_| ())?;
+    if count > MAX_WIRE {
+        return Err(());
+    }
+    encoder.flush().map_err(|_| ())?;
+    let body = String::from_utf8(encoder.finish().map_err(|_| ())?).map_err(|_| ())?;
+    Ok(Answer {
+        status,
+        content_type,
+        set_cookie,
+        body,
+    })
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn device_name() -> String {
+    std::env::var("NAROLINK_DEVICE_NAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            if cfg!(windows) {
+                std::env::var("COMPUTERNAME").ok()
+            } else {
+                std::process::Command::new("/bin/hostname")
+                    .output()
+                    .ok()
+                    .filter(|output| output.status.success())
+                    .and_then(|output| String::from_utf8(output.stdout).ok())
+            }
+        })
+        .unwrap_or_else(|| "Naro 电脑".into())
+        .trim()
+        .chars()
+        .take(80)
+        .collect()
 }
 
 fn read_work(response: reqwest::blocking::Response) -> Result<Work, ()> {
@@ -309,21 +425,42 @@ fn read_work(response: reqwest::blocking::Response) -> Result<Work, ()> {
 }
 
 pub fn normalize(value: &str) -> Result<String, String> {
-    let url = Url::parse(value.trim()).map_err(|_| "请输入服务器 HTTPS 地址")?;
+    let url = connection_url(value)
+        .filter(|url| url.path() == "/")
+        .ok_or("服务器地址需要是独立的 HTTPS 地址")?;
+    Ok(url.origin().ascii_serialization())
+}
+
+pub fn device_url(value: &str) -> Result<Url, String> {
+    connection_url(value)
+        .filter(|url| {
+            url.path() == "/"
+                || url
+                    .path()
+                    .strip_prefix("/devices/")
+                    .and_then(|path| path.strip_suffix('/'))
+                    .is_some_and(|id| {
+                        id.len() == 32
+                            && id
+                                .bytes()
+                                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+                    })
+        })
+        .ok_or_else(|| "请粘贴目标电脑上的设备地址".into())
+}
+
+fn connection_url(value: &str) -> Option<Url> {
+    let url = Url::parse(value.trim()).ok()?;
     let secure = url.scheme() == "https"
         || (url.scheme() == "http"
             && url
                 .host_str()
                 .is_some_and(|host| matches!(host, "127.0.0.1" | "[::1]")));
-    if !secure
-        || !url.has_host()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return Err("服务器地址需要是独立的 HTTPS 地址".into());
-    }
-    Ok(url.origin().ascii_serialization())
+    (secure
+        && url.has_host()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then_some(url)
 }

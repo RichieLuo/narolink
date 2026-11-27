@@ -3,13 +3,14 @@
 mod desktop;
 mod engine;
 mod service;
+mod settings;
 mod web;
 
 fn main() {
     if let Err(problem) = run() {
-        eprintln!("NaroLink: {problem}");
+        eprintln!("Naro: {problem}");
         let _ = rfd::MessageDialog::new()
-            .set_title("NaroLink")
+            .set_title("Naro")
             .set_description(&problem)
             .set_level(rfd::MessageLevel::Error)
             .show();

@@ -1,6 +1,6 @@
 use super::Provider;
 use serde_json::Value;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -11,11 +11,15 @@ use std::sync::{
 };
 use std::time::Duration;
 
+#[cfg(all(test, target_os = "macos"))]
+mod tests;
+
 /// Upper bound for each serialized CLI frame.
 const MAX_INPUT_FRAME: usize = 24 * 1024 * 1024;
 
 /// Resolve known npm packages without passing user input to cmd.exe or a shell.
 pub(super) fn cli_command(provider: Provider) -> Result<Command, String> {
+    let path = cli_search_path()?;
     let name = match provider {
         Provider::Codex => "codex",
         Provider::Claude => "claude",
@@ -23,7 +27,7 @@ pub(super) fn cli_command(provider: Provider) -> Result<Command, String> {
     };
     let executable = std::env::var_os(format!("NAROLINK_{}_CLI", name.to_ascii_uppercase()))
         .map(PathBuf::from)
-        .or_else(|| find_executable(name))
+        .or_else(|| executable_on_path(name, &path))
         .or_else(|| {
             if cfg!(windows) && provider == Provider::Antigravity {
                 let home = directories::BaseDirs::new()?;
@@ -32,7 +36,7 @@ pub(super) fn cli_command(provider: Provider) -> Result<Command, String> {
             let home = directories::BaseDirs::new()?;
             executable_on_path(name, home.home_dir().join(".local/bin").as_os_str())
         })
-        .ok_or("AI CLI not found; install it or select its executable")?;
+        .ok_or("未找到 AI CLI，请安装对应的 CLI 或指定其可执行文件。")?;
     #[cfg(windows)]
     let executable = if provider == Provider::Codex {
         let desktop_bin = directories::BaseDirs::new().map(|dirs| {
@@ -41,11 +45,7 @@ pub(super) fn cli_command(provider: Provider) -> Result<Command, String> {
                 .join("Codex")
                 .join("bin")
         });
-        codex_with_tool_host(
-            executable,
-            &std::env::var_os("PATH").unwrap_or_default(),
-            desktop_bin.as_deref(),
-        )
+        codex_with_tool_host(executable, &path, desktop_bin.as_deref())
     } else {
         executable
     };
@@ -66,27 +66,73 @@ pub(super) fn cli_command(provider: Provider) -> Result<Command, String> {
             let node = if node.is_file() {
                 node
             } else {
-                find_executable("node").ok_or("Node.js is required for this CLI installation")?
+                executable_on_path("node", &path)
+                    .ok_or("Node.js is required for this CLI installation")?
             };
             let mut command = Command::new(node);
-            command.arg(script);
+            command.arg(script).env("PATH", &path);
             return Ok(command);
         }
         return Err("Unsupported CLI shim; choose the native executable or install the standard npm package".into());
     }
-    if executable
+    let mut command = if executable
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("js") || e.eq_ignore_ascii_case("mjs"))
     {
-        let mut command = Command::new(find_executable("node").ok_or("Node.js is required")?);
+        let mut command =
+            Command::new(executable_on_path("node", &path).ok_or("Node.js is required")?);
         command.arg(executable);
-        Ok(command)
+        command
     } else {
-        Ok(Command::new(executable))
-    }
+        Command::new(executable)
+    };
+    // npm entrypoints use /usr/bin/env node, and their children need this PATH too.
+    command.env("PATH", path);
+    Ok(command)
 }
-fn find_executable(name: &str) -> Option<PathBuf> {
-    executable_on_path(name, &std::env::var_os("PATH").unwrap_or_default())
+
+fn cli_search_path() -> Result<OsString, String> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    #[cfg(target_os = "macos")]
+    {
+        let home = directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_owned());
+        macos_cli_search_path(&path, home.as_deref())
+            .map_err(|_| "无法设置 AI CLI 的可执行文件搜索路径".into())
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(path)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_cli_search_path(
+    path: &OsStr,
+    home: Option<&Path>,
+) -> Result<OsString, std::env::JoinPathsError> {
+    // Finder/direct launches may only inherit system directories. Do not run
+    // shell startup files or change the application's process-wide environment.
+    let mut paths: Vec<PathBuf> = if path.is_empty() {
+        Vec::new()
+    } else {
+        std::env::split_paths(path).collect()
+    };
+    let fallback = home.map(|home| home.join(".local/bin")).into_iter().chain(
+        [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+        .into_iter()
+        .map(PathBuf::from),
+    );
+    for directory in fallback {
+        if !paths.contains(&directory) {
+            paths.push(directory);
+        }
+    }
+    std::env::join_paths(paths)
 }
 
 fn executable_on_path(name: &str, path: &OsStr) -> Option<PathBuf> {
@@ -165,6 +211,28 @@ fn windows_file_id(path: &Path) -> Option<(u32, u32, u32)> {
 }
 
 fn spawn_raw(command: &mut Command, cwd: &Path) -> Result<Child, String> {
+    if let Some(proxy) = crate::settings::cli_proxy()? {
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            command.env(key, proxy.as_str());
+        }
+        let mut bypass = "localhost,127.0.0.1,::1,[::1]".to_owned();
+        if let Some(existing) = ["no_proxy", "NO_PROXY"]
+            .into_iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .find(|value| !value.trim().is_empty())
+        {
+            bypass.push(',');
+            bypass.push_str(existing.trim());
+        }
+        command.env("NO_PROXY", &bypass).env("no_proxy", &bypass);
+    }
     command
         .current_dir(cwd)
         .env_remove("NAROLINK_RELAY_TOKEN")
@@ -196,6 +264,57 @@ pub(super) struct Process {
 }
 impl Process {
     pub fn spawn(command: &mut Command, cwd: &Path) -> Result<Self, String> {
+        Self::with_reader(command, cwd, read_cli_frame)
+    }
+
+    pub fn json_output(
+        command: &mut Command,
+        cwd: &Path,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        let process = Self::with_reader(command, cwd, |reader| {
+            let mut bytes = Vec::new();
+            reader
+                .take(4 * 1024 * 1024)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| e.to_string())
+        })?;
+        super::receive(
+            &process,
+            &AtomicBool::new(false),
+            Some(std::time::Instant::now() + timeout),
+        )
+    }
+
+    pub fn first_line(
+        command: &mut Command,
+        cwd: &Path,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        let process = Self::with_reader(command, cwd, |reader| {
+            Ok(read_frame_with_limit(reader, 4096)?
+                .map(|line| Value::String(String::from_utf8_lossy(&line).trim().to_owned())))
+        })?;
+        let line = super::receive(
+            &process,
+            &AtomicBool::new(false),
+            Some(std::time::Instant::now() + timeout),
+        )?;
+        line.as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "CLI 未返回文本".into())
+    }
+
+    fn with_reader(
+        command: &mut Command,
+        cwd: &Path,
+        mut read: impl FnMut(&mut BufReader<std::process::ChildStdout>) -> Result<Option<Value>, String>
+        + Send
+        + 'static,
+    ) -> Result<Self, String> {
         let mut child = spawn_raw(command, cwd)?;
         #[cfg(windows)]
         let job = match WindowsJob::attach(&child) {
@@ -243,7 +362,7 @@ impl Process {
                 if reader_stop.load(Ordering::Acquire) {
                     break;
                 }
-                let result = read_cli_frame(&mut reader);
+                let result = read(&mut reader);
                 match result {
                     Ok(Some(value)) => {
                         if tx.send(Ok(value)).is_err() {
@@ -274,10 +393,14 @@ impl Process {
         })
     }
     pub fn send(&self, value: Value) -> Result<(), String> {
+        Self::send_to(&self.writer, value)
+    }
+
+    pub fn send_to(writer: &SyncSender<Value>, value: Value) -> Result<(), String> {
         // Count serialized bytes (including JSON escapes) before enqueueing. A
         // rejected frame must report an error rather than silently closing stdin.
         validate_input(&value)?;
-        self.writer
+        writer
             .try_send(value)
             .map_err(|_| "AI CLI input channel is unavailable".into())
     }

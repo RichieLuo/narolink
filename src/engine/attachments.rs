@@ -1,10 +1,11 @@
-//! Validated, memory-only image inputs. Source files and metadata are never retained.
+//! Validated image inputs and references to files on the agent's machine.
 //! CLI-owned conversation/session storage is outside the host’s persistence boundary.
 use anyhow::{Result, anyhow, bail};
 use base64::Engine as _;
 use image::{ImageDecoder, ImageEncoder, ImageFormat, ImageReader};
+use std::borrow::Cow;
 use std::io::{Cursor, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub const MAX_IMAGE_ATTACHMENTS: usize = 4;
@@ -14,6 +15,169 @@ pub const MAX_TOTAL_IMAGE_BYTES: usize = 12 * 1024 * 1024;
 pub const MAX_IMAGE_EDGE: u32 = 8192;
 pub const MAX_IMAGE_PIXELS: u64 = 32_000_000;
 const MAX_DECODE_BYTES: u64 = MAX_IMAGE_PIXELS * 8 + 32 * 1024 * 1024;
+pub const MAX_ENCODED_IMAGE_BYTES: usize = MAX_IMAGE_SOURCE_BYTES.div_ceil(3) * 4;
+
+const LOCAL_FILES_PREFIX: &str =
+    "Naro local attachments (use these paths on the agent's machine): ";
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct LocalAttachment {
+    pub path: String,
+    pub directory: bool,
+}
+
+impl LocalAttachment {
+    pub fn name(&self) -> &str {
+        Path::new(&self.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&self.path)
+    }
+}
+
+pub(crate) fn serialize_local_file_labels<S: serde::Serializer>(
+    files: &[LocalAttachment],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+
+    #[derive(serde::Serialize)]
+    struct FileLabel<'a> {
+        name: &'a str,
+        directory: bool,
+    }
+
+    let mut sequence = serializer.serialize_seq(Some(files.len()))?;
+    for file in files {
+        let name = file
+            .path
+            .rsplit(['/', '\\'])
+            .find(|part| !part.is_empty())
+            .unwrap_or("/");
+        sequence.serialize_element(&FileLabel {
+            name,
+            directory: file.directory,
+        })?;
+    }
+    sequence.end()
+}
+
+pub fn with_local_files<'a>(prompt: &'a str, files: &[LocalAttachment]) -> Cow<'a, str> {
+    if files.is_empty() {
+        return Cow::Borrowed(prompt);
+    }
+    let files = serde_json::to_string(files).expect("serializable attachment paths");
+    Cow::Owned(format!("{LOCAL_FILES_PREFIX}{files}\n\n{prompt}"))
+}
+
+pub fn split_local_files(text: &str) -> Option<(&str, Vec<LocalAttachment>)> {
+    let (files, prompt) = text.strip_prefix(LOCAL_FILES_PREFIX)?.split_once("\n\n")?;
+    Some((prompt, serde_json::from_str(files).ok()?))
+}
+
+#[cfg(test)]
+mod local_file_tests {
+    use super::*;
+    use crate::engine::{Message, Role};
+
+    #[test]
+    fn local_files_round_trip_through_cli_history_without_changing_user_text() {
+        let files = vec![
+            LocalAttachment {
+                path: "/work/project/notes with spaces.md".into(),
+                directory: false,
+            },
+            LocalAttachment {
+                path: r"C:\private\资料\".into(),
+                directory: true,
+            },
+        ];
+        let prompt = "Compare the notes with the project.\n\nFocus on the examples.";
+        let cli_prompt = with_local_files(prompt, &files).into_owned();
+        assert!(cli_prompt.contains(&serde_json::to_string(&files).unwrap()));
+        let message = Message::new(Role::User, cli_prompt);
+        assert_eq!(message.text, prompt);
+        assert_eq!(message.local_files, files);
+        let public_message = serde_json::to_value(&message).unwrap();
+        assert_eq!(
+            public_message["local_files"],
+            serde_json::json!([
+                {"name": "notes with spaces.md", "directory": false},
+                {"name": "资料", "directory": true},
+            ])
+        );
+        assert_eq!(with_local_files(prompt, &[]), prompt);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct UserAttachment {
+    pub name: String,
+    pub image: Option<HistoryImage>,
+}
+
+#[derive(Clone, Debug)]
+pub enum HistoryImage {
+    Local(PathBuf),
+    Inline(InlineImage),
+}
+
+#[derive(Clone)]
+pub struct InlineImage {
+    id: uuid::Uuid,
+    data: Arc<str>,
+    media: &'static str,
+}
+
+impl std::fmt::Debug for InlineImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InlineImage")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InlineImage {
+    pub fn from_url(url: &str, remaining: &mut usize) -> Option<Self> {
+        let (header, data) = url.split_once(',')?;
+        let mime_type = header.strip_prefix("data:")?.strip_suffix(";base64")?;
+        Self::from_base64(mime_type, data, remaining)
+    }
+
+    pub fn from_base64(mime_type: &str, data: &str, remaining: &mut usize) -> Option<Self> {
+        let media = match mime_type {
+            "image/png" => "png",
+            "image/jpeg" => "jpeg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            _ => return None,
+        };
+        if data.is_empty() || data.len() > MAX_ENCODED_IMAGE_BYTES.min(*remaining) {
+            return None;
+        }
+        *remaining -= data.len();
+        Some(Self {
+            id: uuid::Uuid::new_v4(),
+            data: Arc::from(data),
+            media,
+        })
+    }
+
+    pub fn id(&self) -> uuid::Uuid {
+        self.id
+    }
+
+    pub fn encoded_len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn decode(&self) -> Result<ImageAttachment> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(self.data.as_bytes())
+            .map_err(|_| anyhow!("图片编码无效"))?;
+        ImageAttachment::from_bytes(format!("image.{}", self.media), &bytes)
+    }
+}
 
 /// A single normalized PNG, shared cheaply between composer/queue snapshots.
 /// Deliberately not serializable: image inputs are not project attachments.
@@ -200,7 +364,7 @@ fn validate_declared_format(name: &str, actual: ImageFormat) -> Result<()> {
     }
     Ok(())
 }
-fn display_name(name: &str) -> String {
+pub(super) fn display_name(name: &str) -> String {
     let name = name.rsplit(['/', '\\']).next().unwrap_or("");
     let name: String = name.chars().filter(|c| !c.is_control()).take(160).collect();
     let name = name.trim();
@@ -232,6 +396,7 @@ impl Write for BoundedPng {
 pub struct ImageUpload {
     pub name: String,
     pub data: String,
+    pub display_name: Option<String>,
 }
 
 pub fn decode_uploads(uploads: Vec<ImageUpload>) -> Result<Vec<ImageAttachment>> {
@@ -241,7 +406,7 @@ pub fn decode_uploads(uploads: Vec<ImageUpload>) -> Result<Vec<ImageAttachment>>
     let mut total = 0;
     let mut images = Vec::with_capacity(uploads.len());
     for upload in uploads {
-        if upload.name.len() > 1024 || upload.data.len() > MAX_IMAGE_SOURCE_BYTES.div_ceil(3) * 4 {
+        if upload.name.len() > 1024 || upload.data.len() > MAX_ENCODED_IMAGE_BYTES {
             bail!("图片超过大小限制");
         }
         let bytes = base64::engine::general_purpose::STANDARD
@@ -251,7 +416,11 @@ pub fn decode_uploads(uploads: Vec<ImageUpload>) -> Result<Vec<ImageAttachment>>
         if total > MAX_IMAGE_SOURCE_BYTES {
             bail!("图片总大小不能超过 12 MiB");
         }
-        images.push(ImageAttachment::from_bytes(upload.name, &bytes)?);
+        let mut image = ImageAttachment::from_bytes(upload.name, &bytes)?;
+        if let Some(name) = upload.display_name {
+            image.name = display_name(&name).into();
+        }
+        images.push(image);
     }
     validate_image_attachments(&images)?;
     Ok(images)
