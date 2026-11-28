@@ -1562,7 +1562,7 @@ enum FileGroupKind {
     Untracked,
 }
 
-fn status_color(status: &str, palette: Palette) -> Color32 {
+pub(super) fn status_color(status: &str, palette: Palette) -> Color32 {
     match status {
         "A" | "?" => palette.added,
         "D" => palette.danger,

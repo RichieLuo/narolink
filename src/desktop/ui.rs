@@ -723,16 +723,27 @@ impl Desktop {
         // Keep both the chat and right panel readable on smaller windows. The session
         // list returns when the panel closes or the window is widened.
         self.sync_git_cwd(ctx);
-        if self.files.is_open() && self.git.is_open() {
+        if self.files.is_open() {
             self.git.close();
+            self.tree.close();
         }
-        let show_sidebar =
-            !(self.files.is_open() || self.git.is_open()) || ctx.content_rect().width() >= 1080.;
+        let show_sidebar = !(self.files.is_open() || self.git.is_open() || self.tree.is_open())
+            || ctx.content_rect().width() >= 1080.;
         if show_sidebar {
             self.sidebar(ctx);
         }
         self.conversation_header(ctx, show_sidebar);
-        self.files.show(ctx);
+        if self.files.show(ctx) {
+            self.files.close();
+            self.tree.open();
+        }
+        let status = self.git.status.as_ref().filter(|status| status.is_repo);
+        if let Some(command) = self
+            .tree
+            .show(ctx, status, self.git.serial, self.git.loading)
+        {
+            self.handle_tree_command(ctx, command);
+        }
         if let Some(command) = self.git.show(ctx) {
             self.handle_git_command(ctx, command);
         }
@@ -879,6 +890,26 @@ impl Desktop {
                         .clicked()
                     {
                         self.toggle_git_panel(ctx);
+                    }
+                    // File previews read from this machine, so remote workspaces have no tree.
+                    if self.remote.is_none() {
+                        let open = self.tree.is_open();
+                        let tree_btn = Icon::Folder
+                            .label(RichText::new(language.text("文件")).size(12.))
+                            .selected(open)
+                            .atom_ui(ui);
+                        Icon::Folder.paint_in(
+                            ui,
+                            &tree_btn,
+                            if open { palette.accent } else { palette.muted },
+                        );
+                        if tree_btn
+                            .response
+                            .on_hover_text(language.text("文件目录"))
+                            .clicked()
+                        {
+                            self.toggle_tree_panel(ctx);
+                        }
                     }
                 }
                 if self.view.session.is_some() {

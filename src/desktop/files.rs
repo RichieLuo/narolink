@@ -21,6 +21,7 @@ const CODE_LINE_HEIGHT: f32 = 19.;
 #[derive(Default)]
 pub(super) struct FileViewer {
     preview: Option<Preview>,
+    from_tree: bool,
 }
 
 struct Preview {
@@ -42,14 +43,24 @@ impl FileViewer {
     }
 
     pub(super) fn open(&mut self, ctx: &egui::Context, path: PathBuf, workspace: &Path) {
+        self.from_tree = false;
         self.preview = Some(Preview::new(ctx, path, workspace.to_owned()));
     }
 
-    pub(super) fn show(&mut self, ctx: &egui::Context) {
+    /// Opens a file picked in the directory tree, with a way back to it.
+    pub(super) fn open_from_tree(&mut self, ctx: &egui::Context, path: PathBuf, workspace: &Path) {
+        self.open(ctx, path, workspace);
+        self.from_tree = true;
+    }
+
+    /// Returns true when the user asks to go back to the directory tree.
+    pub(super) fn show(&mut self, ctx: &egui::Context) -> bool {
         let palette = Palette::from_context(ctx);
+        let from_tree = self.from_tree;
         let Some(preview) = &mut self.preview else {
-            return;
+            return false;
         };
+        let mut back = false;
         preview.poll();
         let available = ctx.available_rect().width();
         let chat_width = (available * 0.46).clamp(360., 440.);
@@ -106,6 +117,24 @@ impl FileViewer {
                                 }
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                     ui.spacing_mut().item_spacing.x = 7.;
+                                    if from_tree
+                                        && ui
+                                            .add(
+                                                Button::new(
+                                                    RichText::new(format!(
+                                                        "‹ {}",
+                                                        language.text("文件目录")
+                                                    ))
+                                                    .size(12.5)
+                                                    .color(palette.accent),
+                                                )
+                                                .frame(false),
+                                            )
+                                            .on_hover_text(language.text("返回文件目录"))
+                                            .clicked()
+                                    {
+                                        back = true;
+                                    }
                                     let icon = if file.is_some_and(|file| file.markdown) {
                                         Icon::Document
                                     } else {
@@ -262,6 +291,7 @@ impl FileViewer {
             next.raw = preview.raw;
             self.preview = Some(next);
         }
+        back
     }
 }
 
@@ -391,6 +421,7 @@ mod tests {
                 raw: false,
                 cache: CommonMarkCache::default(),
             }),
+            from_tree: false,
         }
     }
 

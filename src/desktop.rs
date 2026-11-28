@@ -2,6 +2,7 @@ use crate::engine::attachments::{
     ImageAttachment, LocalAttachment, MAX_IMAGE_ATTACHMENTS, validate_image_attachments,
 };
 mod chat_menu;
+mod file_tree;
 mod files;
 mod git;
 mod git_diff;
@@ -222,6 +223,7 @@ struct Desktop {
     note: Option<String>,
     markdown: egui_commonmark::CommonMarkCache,
     files: files::FileViewer,
+    tree: file_tree::FileTree,
     git: git::GitPanel,
     #[cfg(not(target_os = "macos"))]
     attachment_picker: Option<(egui::Id, egui_file_dialog::FileDialog)>,
@@ -638,6 +640,7 @@ impl Desktop {
             note: None,
             markdown: Default::default(),
             files: Default::default(),
+            tree: Default::default(),
             git: Default::default(),
             #[cfg(not(target_os = "macos"))]
             attachment_picker: None,
@@ -765,6 +768,7 @@ impl Desktop {
         self.pair_dialog = false;
         self.pairing_qr = None;
         self.files = files::FileViewer::default();
+        self.tree = file_tree::FileTree::default();
         self.git.reset_for_workspace();
         self.thumbnails = thumbnails::Thumbnails::default();
         self.markdown = egui_commonmark::CommonMarkCache::default();
@@ -997,8 +1001,40 @@ impl Desktop {
 
     fn sync_git_cwd(&mut self, ctx: &egui::Context) {
         let cwd = self.current_git_cwd();
-        if self.git.set_cwd(cwd) && self.git.is_open() {
+        self.tree.set_root(cwd.clone());
+        if self.git.set_cwd(cwd) && (self.git.is_open() || self.tree.is_open()) {
             self.refresh_git(ctx);
+        }
+    }
+
+    fn toggle_tree_panel(&mut self, ctx: &egui::Context) {
+        if self.tree.is_open() {
+            self.tree.close();
+            return;
+        }
+        self.git.close();
+        self.files.close();
+        let cwd = self.current_git_cwd();
+        self.tree.set_root(cwd.clone());
+        self.tree.open();
+        self.git.set_cwd(cwd);
+        self.refresh_git(ctx);
+    }
+
+    fn handle_tree_command(&mut self, ctx: &egui::Context, command: file_tree::TreeCommand) {
+        match command {
+            file_tree::TreeCommand::Close => self.tree.close(),
+            file_tree::TreeCommand::Refresh => {
+                self.tree.refresh();
+                self.refresh_git(ctx);
+            }
+            file_tree::TreeCommand::OpenFile(path) => {
+                let Some(cwd) = self.current_git_cwd() else {
+                    return;
+                };
+                self.tree.close();
+                self.files.open_from_tree(ctx, path, &cwd);
+            }
         }
     }
 
@@ -1008,6 +1044,7 @@ impl Desktop {
             return;
         }
         self.files.close();
+        self.tree.close();
         self.git.open = true;
         let cwd = self.current_git_cwd();
         self.git.set_cwd(cwd);
@@ -1916,8 +1953,9 @@ impl Desktop {
             }
             self.read_history(ctx, true);
             self.refresh_inventory(ctx, false);
-            if self.git.is_open() {
+            if self.git.is_open() || self.tree.is_open() {
                 self.refresh_git(ctx);
+                self.tree.refresh();
             }
         }
     }

@@ -694,5 +694,16 @@
   "⋯ 展开 {count} 行未改动代码 ⋯": ["⋯ Expand {count} unchanged lines ⋯", "⋯ 未変更の {count} 行を展開 ⋯"],
   "复制旧版本行": ["Copy old line", "旧バージョンの行をコピー"],
   "复制新版本行": ["Copy new line", "新バージョンの行をコピー"],
-  "复制当前行": ["Copy line", "この行をコピー"]
+  "复制当前行": ["Copy line", "この行をコピー"],
+  "文件": ["Files", "ファイル"],
+  "文件目录": ["File tree", "ファイルツリー"],
+  "关闭文件目录": ["Close file tree", "ファイルツリーを閉じる"],
+  "刷新文件目录": ["Refresh file tree", "ファイルツリーを更新"],
+  "返回文件目录": ["Back to file tree", "ファイルツリーに戻る"],
+  "复制相对路径": ["Copy relative path", "相対パスをコピー"],
+  "请先选择工作目录": ["Choose a working folder first", "先に作業フォルダーを選択してください"],
+  "空文件夹": ["Empty folder", "空のフォルダー"],
+  "文件过多，仅显示前 5000 项": ["Too many files; showing the first 5000", "ファイルが多すぎるため、先頭の 5000 件のみ表示しています"],
+  "没有权限读取此文件夹。": ["No permission to read this folder.", "このフォルダーを読み取る権限がありません。"],
+  "无法读取此文件夹。": ["Unable to read this folder.", "このフォルダーを読み取れません。"]
 }
