@@ -1,0 +1,15 @@
+{
+  "id": "/",
+  "name": "Naro",
+  "short_name": "Naro",
+  "description": "跨设备接续电脑上的 CLI 会话",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    {"src":"/icons/192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+    {"src":"/icons/512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ]
+}

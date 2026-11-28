@@ -1,0 +1,12 @@
+*
+!relay/
+!relay/Dockerfile
+!relay/go.mod
+!relay/relay.go
+!relay/relay_stream.go
+!relay/relay_ws.go
+!web/
+!web/go.mod
+!web/embed.go
+!web/public/
+!web/public/**
