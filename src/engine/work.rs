@@ -1,6 +1,6 @@
 use super::{attachments::UserAttachment, cut, short};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 const MAX_STEPS: usize = 96;
 pub const MAX_AGENTS: usize = 64;
@@ -158,6 +158,8 @@ pub struct Work {
     pub images: Vec<PathBuf>,
     #[serde(skip)]
     pub remote_previews: Vec<UserAttachment>,
+    #[serde(skip)]
+    pub remote_file_links: BTreeMap<String, String>,
 }
 
 pub enum ReplyPart<'a> {
@@ -216,6 +218,7 @@ impl Work {
             && self.changes.is_empty()
             && self.images.is_empty()
             && self.remote_previews.is_empty()
+            && self.remote_file_links.is_empty()
     }
 
     pub fn record_agent(&mut self, agent: Agent) {

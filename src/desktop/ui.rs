@@ -14,7 +14,10 @@ use eframe::egui::{
     Margin, Rect, RichText, Stroke, StrokeKind, TextEdit, TextStyle, Ui, WidgetInfo, WidgetType,
     vec2,
 };
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 const COLUMN: f32 = 744.;
 const TITLE_BAR_HEIGHT: f32 = 38.;
@@ -2156,12 +2159,11 @@ impl Desktop {
     fn conversation(&mut self, ui: &mut Ui) {
         let palette = Palette::of(ui);
         let language = Language::in_ui(ui);
-        let cwd = self.remote.is_none().then(|| {
-            self.view
-                .session
-                .as_ref()
-                .map_or(self.folder.as_path(), |session| session.cwd.as_path())
-        });
+        let cwd = self
+            .view
+            .session
+            .as_ref()
+            .map_or(self.folder.as_path(), |session| session.cwd.as_path());
         if let Some(warning) = &self.view.transcript.warning {
             ui.label(
                 RichText::new(language.text(warning))
@@ -2194,6 +2196,7 @@ impl Desktop {
                     render_prompt(ui, &entry.text);
                 }
                 Role::Assistant => {
+                    let file_links = ReplyFileLinks::new(cwd, self.remote.as_ref(), &entry.work);
                     for step in entry
                         .work
                         .steps
@@ -2206,7 +2209,7 @@ impl Desktop {
                             &mut self.files,
                             &step.id,
                             &step.text,
-                            cwd,
+                            file_links,
                         );
                     }
                     render_reply(
@@ -2215,7 +2218,7 @@ impl Desktop {
                         &mut self.files,
                         &entry.text,
                         &entry.work,
-                        cwd,
+                        file_links,
                     );
                     if let Some(client) = &self.remote {
                         self.thumbnails.show(
@@ -2240,12 +2243,11 @@ impl Desktop {
             .remote
             .as_ref()
             .map(|client| (client, snapshot.run.id.as_str()));
-        let cwd = remote.is_none().then(|| {
-            self.view
-                .session
-                .as_ref()
-                .map_or(self.folder.as_path(), |session| session.cwd.as_path())
-        });
+        let cwd = self
+            .view
+            .session
+            .as_ref()
+            .map_or(self.folder.as_path(), |session| session.cwd.as_path());
         let replies = snapshot.replies();
         let run = if remote.is_none() {
             self.service.run(&snapshot.run.id).ok()
@@ -2279,19 +2281,20 @@ impl Desktop {
                     .show(ui, &run_images(run.as_deref(), remote, images, image_start));
                 render_prompt_files(ui, files);
                 render_prompt(ui, prompt);
-                for step in replies
-                    .iter()
-                    .flat_map(|reply| &reply.work.steps)
-                    .filter(|step| step.kind == StepKind::Note && step.after.as_deref() == after)
-                {
-                    render_progress_note(
-                        ui,
-                        &mut self.markdown,
-                        &mut self.files,
-                        &step.id,
-                        &step.text,
-                        cwd,
-                    );
+                for reply in &replies {
+                    let file_links = ReplyFileLinks::new(cwd, self.remote.as_ref(), reply.work);
+                    for step in reply.work.steps.iter().filter(|step| {
+                        step.kind == StepKind::Note && step.after.as_deref() == after
+                    }) {
+                        render_progress_note(
+                            ui,
+                            &mut self.markdown,
+                            &mut self.files,
+                            &step.id,
+                            &step.text,
+                            file_links,
+                        );
+                    }
                 }
                 if let Some(reply) = replies.iter().find(|reply| reply.after == after) {
                     render_reply(
@@ -2300,7 +2303,7 @@ impl Desktop {
                         &mut self.files,
                         &reply.text,
                         reply.work,
-                        cwd,
+                        ReplyFileLinks::new(cwd, self.remote.as_ref(), reply.work),
                     );
                     if let Some((client, _)) = remote {
                         self.thumbnails.show(
@@ -5667,7 +5670,7 @@ mod effort_tests {
                         &mut files,
                         "BeforeAfter",
                         &work,
-                        Some(Path::new("/tmp")),
+                        ReplyFileLinks::Local(Path::new("/tmp")),
                     );
                 });
             },
@@ -6301,18 +6304,33 @@ mod sidebar_tests {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReplyFileLinks<'a> {
+    Local(&'a Path),
+    Remote(&'a remote::RemoteClient, &'a BTreeMap<String, String>),
+}
+
+impl<'a> ReplyFileLinks<'a> {
+    fn new(cwd: &'a Path, client: Option<&'a remote::RemoteClient>, work: &'a Work) -> Self {
+        match client {
+            Some(client) => Self::Remote(client, &work.remote_file_links),
+            None => Self::Local(cwd),
+        }
+    }
+}
+
 fn render_progress_note(
     ui: &mut Ui,
     cache: &mut egui_commonmark::CommonMarkCache,
     files: &mut files::FileViewer,
     id: &str,
     text: &str,
-    cwd: Option<&Path>,
+    links: ReplyFileLinks<'_>,
 ) {
     if !text.is_empty() {
         ui.add_space(8.);
         ui.push_id(("progress", id), |ui| {
-            render_document(ui, cache, files, text, cwd)
+            render_document(ui, cache, files, text, links)
         });
     }
 }
@@ -6322,14 +6340,19 @@ fn render_document(
     cache: &mut egui_commonmark::CommonMarkCache,
     files: &mut files::FileViewer,
     text: &str,
-    cwd: Option<&Path>,
+    links: ReplyFileLinks<'_>,
 ) {
-    if let Some(cwd) = cwd {
-        if let Some(path) = markdown::render(ui, cache, text, cwd) {
-            files.open(ui.ctx(), path, cwd);
+    match links {
+        ReplyFileLinks::Local(cwd) => {
+            if let Some(path) = markdown::render(ui, cache, text, cwd) {
+                files.open(ui.ctx(), path, cwd);
+            }
         }
-    } else {
-        markdown::render_remote(ui, cache, text);
+        ReplyFileLinks::Remote(client, links) => {
+            if let Some(key) = markdown::render_remote(ui, cache, text, links) {
+                files.open_remote(ui.ctx(), client, key);
+            }
+        }
     }
 }
 
@@ -6468,7 +6491,7 @@ fn render_reply(
     files: &mut files::FileViewer,
     text: &str,
     work: &Work,
-    cwd: Option<&Path>,
+    links: ReplyFileLinks<'_>,
 ) {
     let language = Language::in_ui(ui);
     if !work.plan.is_empty() {
@@ -6491,12 +6514,12 @@ fn render_reply(
             ReplyPart::Text { offset, text } if !text.trim().is_empty() => {
                 ui.add_space(8.);
                 ui.push_id(("reply text", offset), |ui| {
-                    render_document(ui, cache, files, text, cwd);
+                    render_document(ui, cache, files, text, links);
                 });
             }
             ReplyPart::Steps(steps) => {
                 ui.push_id(("reply steps", &steps[0].id), |ui| {
-                    render_work_steps(ui, cache, files, steps, cwd)
+                    render_work_steps(ui, cache, files, steps, links)
                 });
             }
             _ => {}
@@ -6608,7 +6631,7 @@ fn render_work_steps(
     cache: &mut egui_commonmark::CommonMarkCache,
     files: &mut files::FileViewer,
     steps: &[Step],
-    cwd: Option<&Path>,
+    links: ReplyFileLinks<'_>,
 ) {
     let palette = Palette::of(ui);
     let language = Language::in_ui(ui);
@@ -6705,7 +6728,7 @@ fn render_work_steps(
                                 ui.push_id(&step.id, |ui| {
                                     ui.style_mut().override_font_id =
                                         Some(egui::FontId::proportional(13.));
-                                    render_document(ui, cache, files, &step.text, cwd);
+                                    render_document(ui, cache, files, &step.text, links);
                                 });
                             } else {
                                 ui.add(
@@ -6760,7 +6783,7 @@ fn wide_markdown_table_does_not_expand_chat_or_prevent_scrolling() {
                                                 &mut files,
                                                 text,
                                                 &work,
-                                                Some(cwd),
+                                                ReplyFileLinks::Local(cwd),
                                             );
                                         });
                                     }
@@ -6849,7 +6872,13 @@ fn expanded_work_panel_renders_thinking_markdown() {
     )];
     let output = ctx.run(egui::RawInput::default(), |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
-            render_work_steps(ui, &mut cache, &mut files, &steps, Some(Path::new("/tmp")));
+            render_work_steps(
+                ui,
+                &mut cache,
+                &mut files,
+                &steps,
+                ReplyFileLinks::Local(Path::new("/tmp")),
+            );
         });
     });
     let labels = output.shapes.iter().filter_map(|shape| {

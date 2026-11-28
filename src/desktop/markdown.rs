@@ -27,11 +27,33 @@ pub(super) fn render(
     text: &str,
     cwd: &Path,
 ) -> Option<PathBuf> {
-    render_markdown(ui, cache, text, Some(cwd))
+    match render_markdown(ui, cache, text, FileLinks::Local(cwd))? {
+        FileLink::Local(path) => Some(path),
+        FileLink::Remote(_) => None,
+    }
 }
 
-pub(super) fn render_remote(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
-    render_markdown(ui, cache, text, None);
+pub(super) fn render_remote(
+    ui: &mut Ui,
+    cache: &mut CommonMarkCache,
+    text: &str,
+    links: &BTreeMap<String, String>,
+) -> Option<String> {
+    match render_markdown(ui, cache, text, FileLinks::Remote(links))? {
+        FileLink::Local(_) => None,
+        FileLink::Remote(key) => Some(key.to_owned()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FileLinks<'a> {
+    Local(&'a Path),
+    Remote(&'a BTreeMap<String, String>),
+}
+
+enum FileLink<'a> {
+    Local(PathBuf),
+    Remote(&'a str),
 }
 
 fn parser_options() -> Options {
@@ -52,15 +74,15 @@ fn web_link(target: &str) -> bool {
     })
 }
 
-fn render_markdown(
+fn render_markdown<'a>(
     ui: &mut Ui,
     cache: &mut CommonMarkCache,
     text: &str,
-    cwd: Option<&Path>,
-) -> Option<PathBuf> {
+    links: FileLinks<'a>,
+) -> Option<FileLink<'a>> {
     let palette = Palette::of(ui);
     cache.link_hooks_clear();
-    let mut local_files = Vec::new();
+    let mut linked_files = Vec::new();
     let mut table_cache = CommonMarkCache::default();
     let mut blocks = Vec::new();
     let mut code: Option<(Range<usize>, CodeBlock)> = None;
@@ -78,8 +100,14 @@ fn render_markdown(
                 if table.is_some() {
                     table_cache.add_link_hook(dest_url.as_ref());
                 }
-                if let Some(path) = cwd.and_then(|cwd| local_file(&dest_url, cwd)) {
-                    local_files.push((dest_url, path));
+                let file = match links {
+                    FileLinks::Local(cwd) => local_file(&dest_url, cwd).map(FileLink::Local),
+                    FileLinks::Remote(keys) => keys
+                        .get(dest_url.as_ref())
+                        .map(|key| FileLink::Remote(key.as_str())),
+                };
+                if let Some(file) = file {
+                    linked_files.push((dest_url, file));
                 }
             }
             Event::Start(Tag::Image { id, dest_url, .. }) => {
@@ -132,7 +160,7 @@ fn render_markdown(
         ui.visuals_mut().code_bg_color = palette.soft;
         ui.style_mut().url_in_tooltip = true;
         let viewer = CommonMarkViewer::new().explicit_image_uri_scheme(true);
-        let remote = cwd.is_none();
+        let remote = matches!(links, FileLinks::Remote(_));
         if blocks.is_empty() {
             show_markdown(ui, cache, text, viewer, remote);
         } else {
@@ -141,7 +169,7 @@ fn render_markdown(
             let (markdown, marker) = with_placeholders(text, &blocks);
             let table_cache = RefCell::new(table_cache);
             let table_link = table_link.clone();
-            let targets = local_files
+            let targets = linked_files
                 .iter()
                 .map(|(target, _)| target.to_string())
                 .collect::<Vec<_>>();
@@ -198,17 +226,18 @@ fn render_markdown(
     });
     super::chat_menu::publish_hovered_file(
         ui.ctx(),
-        local_files
-            .iter()
-            .map(|(target, path)| (target.as_ref(), path.as_path())),
+        linked_files.iter().filter_map(|(target, file)| match file {
+            FileLink::Local(path) => Some((target.as_ref(), path.as_path())),
+            FileLink::Remote(_) => None,
+        }),
     );
-    local_files
+    linked_files
         .into_iter()
         .enumerate()
         .find(|(index, (target, _))| {
             table_link.get() == Some(*index) || cache.get_link_hook(target) == Some(true)
         })
-        .map(|(_, (_, path))| path)
+        .map(|(_, (_, file))| file)
 }
 
 fn show_markdown(
@@ -737,7 +766,10 @@ mod tests {
         let mut cache = CommonMarkCache::default();
         let output = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                render_remote(ui, &mut cache, document);
+                assert_eq!(
+                    render_remote(ui, &mut cache, document, &BTreeMap::new()),
+                    None
+                );
             });
         });
         assert!(loads.0.lock().unwrap().is_empty());
@@ -761,6 +793,76 @@ mod tests {
                 .iter()
                 .any(|uri| uri == "https://example.com/remote.png")
         );
+    }
+
+    #[test]
+    fn remote_file_links_use_host_keys_in_prose_and_tables() {
+        let document = "[Mac README](file:///Volumes/Workspace/README.md#L10)\n\n\
+            [Unregistered](file:///tmp/local.md)\n\n\
+            | File |\n| --- |\n| [Source code][relative] |\n\n\
+            [relative]: src/main.rs:42";
+        let readme_key = "a".repeat(64);
+        let source_key = "b".repeat(64);
+        let links = BTreeMap::from([
+            (
+                "file:///Volumes/Workspace/README.md#L10".to_owned(),
+                readme_key.clone(),
+            ),
+            ("src/main.rs:42".to_owned(), source_key.clone()),
+        ]);
+        let ctx = egui::Context::default();
+        let mut cache = CommonMarkCache::default();
+        let mut frame = |events| {
+            let mut opened = None;
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        vec2(600., 400.),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        opened = render_remote(ui, &mut cache, document, &links);
+                    });
+                },
+            );
+            (output, opened)
+        };
+        frame(Vec::new());
+        let (output, opened) = frame(Vec::new());
+        assert!(opened.is_none());
+        for (label, expected) in [
+            ("Mac README", Some(&readme_key)),
+            ("Source code", Some(&source_key)),
+            ("Unregistered", None),
+        ] {
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.visual_bounding_rect().center())
+                    }
+                    _ => None,
+                })
+                .expect("link should be painted");
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let (clicked, opened) = frame(vec![
+                egui::Event::PointerMoved(pos),
+                button(true),
+                button(false),
+            ]);
+            assert_eq!(opened.as_ref(), expected, "clicked {label}");
+            assert!(clicked.platform_output.commands.is_empty());
+        }
     }
 
     #[test]

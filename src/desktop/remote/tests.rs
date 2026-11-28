@@ -8,6 +8,8 @@ use axum::{
 
 const ID: &str = "0123456789abcdef0123456789abcdef";
 const COOKIE: &str = "narolink_device=scoped-token";
+const FILE_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const LINK_TARGET: &str = "/Users/mac/WorkSpace/%E8%AF%B4%E6%98%8E.md:2";
 
 #[test]
 fn pairing_input_keeps_only_the_device_address_and_valid_code() {
@@ -39,7 +41,10 @@ fn remote_wire_preserves_work_and_never_converts_host_files_into_local_paths() {
         }, {
             "role": "assistant", "text": "Here is the output",
             "work": {"images": ["/private/output.png"]},
-            "rendered": {"previews": [{"name": "output.png", "url": "/api/previews/0123"}]}
+            "rendered": {
+                "previews": [{"name": "output.png", "url": "/api/previews/0123"}],
+                "file_links": {(LINK_TARGET): FILE_KEY, "other.md": "../../logout"}
+            }
         }]
     }))
     .unwrap();
@@ -52,6 +57,10 @@ fn remote_wire_preserves_work_and_never_converts_host_files_into_local_paths() {
     assert!(transcript.messages[0].attachments[1].image.is_none());
     assert!(transcript.messages[1].work.images.is_empty());
     assert_eq!(transcript.messages[1].work.remote_previews.len(), 1);
+    assert_eq!(
+        transcript.messages[1].work.remote_file_links,
+        BTreeMap::from([(LINK_TARGET.into(), FILE_KEY.into())])
+    );
 
     let live: LiveSnapshot = serde_json::from_value(json!({
         "id": "run", "provider": "codex", "title": "Run",
@@ -62,17 +71,26 @@ fn remote_wire_preserves_work_and_never_converts_host_files_into_local_paths() {
         }],
         "replies": [{
             "after": null,
-            "work": {"steps": [{"id": "thinking", "kind": "thinking", "status": "running"}]}
+            "work": {"steps": [{"id": "thinking", "kind": "thinking", "status": "running"}]},
+            "rendered": {"file_links": {"README.md": FILE_KEY}}
         }, {
             "after": "follow", "work": {"plan": [{"step": "Finish", "status": "pending"}]},
-            "rendered": {"previews": [{"name": "unsafe.png", "url": "/api/previews/../../logout"}]}
+            "rendered": {
+                "previews": [{"name": "unsafe.png", "url": "/api/previews/../../logout"}],
+                "file_links": {(LINK_TARGET): FILE_KEY}
+            }
         }]
     }))
     .unwrap();
     let snapshot = Snapshot::from(live);
     assert_eq!(snapshot.work.steps[0].id, "thinking");
+    assert_eq!(snapshot.work.remote_file_links["README.md"], FILE_KEY);
     assert_eq!(snapshot.follow_ups[0].work.plan[0].step, "Finish");
     assert!(snapshot.follow_ups[0].work.remote_previews.is_empty());
+    assert_eq!(
+        snapshot.follow_ups[0].work.remote_file_links[LINK_TARGET],
+        FILE_KEY
+    );
 }
 
 #[test]
@@ -111,6 +129,14 @@ fn remote_client_uses_scoped_cookie_and_existing_control_endpoints() {
     assert!(client.snapshot("missing").unwrap().is_none());
     assert!(client.snapshot("redirect").is_err());
     assert_eq!(client.image("active", 0).unwrap(), b"test png");
+    let file = client.file_preview(FILE_KEY).unwrap();
+    assert_eq!(file.name, "说明.md");
+    assert_eq!(file.text, "# Test Mac\n[Details](docs/details.md)\n");
+    assert_eq!(
+        file.file_links,
+        BTreeMap::from([("docs/details.md".into(), FILE_KEY.into())])
+    );
+    assert!(client.file_preview("../../logout").is_err());
     client.stop("active").unwrap();
 
     shutdown.send(()).unwrap();
@@ -156,6 +182,15 @@ async fn device_api(request: Request) -> AxumResponse {
             .header(header::CONTENT_TYPE, "image/png")
             .body(Body::from("test png"))
             .unwrap(),
+        path if path.strip_prefix("api/file-previews/") == Some(FILE_KEY) => {
+            assert_eq!(request.method(), Method::GET);
+            Json(json!({
+                "name": "说明.md",
+                "text": "# Test Mac\n[Details](docs/details.md)\n",
+                "file_links": {"docs/details.md": FILE_KEY, "other.md": "../../logout"}
+            }))
+            .into_response()
+        }
         "api/runs/active/stop" => {
             assert_eq!(request.method(), Method::POST);
             assert_origins_match(&request);

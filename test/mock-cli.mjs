@@ -2,6 +2,7 @@ import {createInterface} from "node:readline";
 import assert from "node:assert/strict";
 import {existsSync, readFileSync, writeFileSync} from "node:fs";
 import path from "node:path";
+import {pathToFileURL} from "node:url";
 
 const args = process.argv.slice(2);
 const input = createInterface({input:process.stdin});
@@ -151,7 +152,7 @@ function rpc(frame) {
         row({type:"fileChange",id:"patch",status:"completed",changes:[{
           path:path.join(cwd,"example.js"),kind:{type:"update"},diff:"@@ -1 +1,2 @@\n-old\n+new\n+second\n",
         }]}),
-        row({type:"agentMessage",id:"comment-1",phase:"commentary",text:"First progress update"}),
+        row({type:"agentMessage",id:"comment-1",phase:"commentary",text:"First progress update [License](LICENSE)"}),
         row({type:"userMessage",content:[
           {type:"text",text:desktopAttachmentHeader + localAttachmentHeader + "Original Codex prompt"},
           {type:"localImage",path:photo},
@@ -163,6 +164,7 @@ function rpc(frame) {
         row({type:"agentMessage",id:"answer-1",phase:"final_answer",text:
           "Existing Codex response. [Open site](https://example.com/) [Preview](preview%20file.png) " +
           `[README](<${path.join(cwd,"README.md").replaceAll("\\","/")}:12>) [README relative](README.md) ` +
+          `[README file URL](${pathToFileURL(path.join(cwd,"README.md")).href}) ` +
           "[Outside text](../outside.txt) " +
           "[Outside](../outside.png) [Invalid](javascript:invalid)"}),
         row({...searchAgent,id:"search-finish",kind:"completed"}),
@@ -172,7 +174,7 @@ function rpc(frame) {
         row({...searchAgent,id:"search-start",kind:"started"}),
         row({type:"agentMessage",id:"comment-2",phase:"commentary",text:"Second progress update"}),
         row({type:"reasoning",id:"stored-summary",summary:["**Inspecting the repository**",
-          "Comparing `saved results` [Link](javascript:invalid)"]}),
+          "Comparing `saved results` [Link](javascript:invalid) [English](docs/README%20en.md)"]}),
         row({type:"reasoning",id:"private",summary:[" ","\n"],content:["raw reasoning is not a summary"]}),
       ];
       if (readFileSync(rollout,"utf8").includes("external update")) data.unshift(

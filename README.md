@@ -4,15 +4,23 @@
 
 在电脑、手机和平板之间接续 Codex、Claude Code 和 Antigravity 会话。目标电脑上的 Naro 桌面端运行 CLI，其他电脑可通过 Naro 桌面端连接，手机和平板可通过网页连接。
 
-## 中继如何工作
+[系统架构](#系统架构) · [开始使用](#开始使用) · [部署 Go 中继](#部署-go-中继) · [源码目录](#源码目录) · [从源码构建与测试](#从源码构建与测试)
 
-**Naro Go 中继不持久化用户数据。** 聊天内容、附件、文件预览和配对记录都不在中继落盘，只在内存中转发。会话历史由目标电脑上的 CLI 管理，项目文件从目标电脑的工作区读取。
+## 系统架构
 
-![Naro 中继流程。目标电脑主动建立单条 WSS 长连接并在空闲时只发心跳，Go 中继在内存中复用该连接并发转发 HTTPS 请求与 SSE 流式回复。](assets/readme/relay.zh-CN.png)
+**会话在项目所在的电脑上运行。** 这台目标电脑运行 Naro 和已登录的 CLI。本机可以用桌面窗口或浏览器操作，手机和另一台电脑通过 Go 中继接入同一台目标电脑。
 
-目标电脑只需主动建立 **1 条到 Go 中继的 WSS 长连接**，无需开放入站端口，空闲时只收发心跳。中继通过请求 ID 在这条连接上并发转发请求、分片响应和流式回复，流式输出期间仍可即时处理停止、审批和后续消息。浏览器与另一台电脑仍使用现有 HTTPS API 和 SSE。配对码由目标电脑验证，配对凭证保存在访问端；中继仅在内存中维护设备路由、设备名和在线状态，转发结束、超时或断线后及时清理。断线或中继重启后，目标电脑使用带随机抖动的退避策略自动重连，且不会自动重复执行已发出的写操作。
+![Naro 系统架构。外部设备经 Go 中继和 WSS 进入目标电脑的本机 API，本机浏览器也连接该 API。API 与本机桌面窗口共用任务服务，经适配层调用本机 CLI。项目文件和 CLI 会话历史在目标电脑。](assets/readme/architecture.zh-CN.png)
 
-官方部署的 HTTPS 反向代理（Nginx）会记录访问日志，包括来源 IP 和请求路径。
+### 目标电脑上的分层
+
+- **接入。** 桌面窗口、本机 HTTP API 和 WSS 客户端都在同一个 Rust 进程里。桌面窗口直接调用任务服务。本机浏览器和中继转来的请求通过 HTTP API 进入。
+- **任务。** 共用的 `Service` 管理运行状态、排队、引导、停止和审批。接入同一台目标电脑的设备可以查看和操作同一个任务。
+- **执行。** `engine` 调用对应的 CLI 子进程来开启或续聊会话，并把 CLI 输出转成任务事件。项目文件和 CLI 会话历史都保存在目标电脑上。
+
+### 从手机发一条消息
+
+手机网页用 HTTPS 把消息发给 Go 中继。中继按设备 ID 找到目标电脑，沿这台电脑主动建立的 WSS 长连接转发请求。Naro 把请求交给本机 API。网页通过 SSE 事件流接收 CLI 的实时输出，输出也沿这条 WSS 连接经中继返回。
 
 ## 开始使用
 
@@ -35,6 +43,16 @@
 同一台电脑可通过 **设备连接 → 打开本机网页** 使用浏览器工作台，默认地址是 `http://127.0.0.1:4318`。
 
 Naro 桌面端会在启动后检查更新，也可以打开 **设置 → 软件更新** 手动检查。发现新版本后，可下载并在任务结束后确认重启安装。之前使用 `0.1.x` 的用户需要先手动安装新的 `0.0.0` 起始版一次。
+
+## 中继如何工作
+
+**Naro Go 中继不持久化用户数据。** 聊天内容、附件、文件预览和配对记录都不在中继落盘，只在内存中转发。会话历史由目标电脑上的 CLI 管理，项目文件从目标电脑的工作区读取。
+
+![Naro 中继流程。目标电脑主动建立单条 WSS 长连接并在空闲时只发心跳，Go 中继在内存中复用该连接并发转发 HTTPS 请求与 SSE 流式回复。](assets/readme/relay.zh-CN.png)
+
+目标电脑只需主动建立 **1 条到 Go 中继的 WSS 长连接**，无需开放入站端口，空闲时只收发心跳。中继通过请求 ID 在这条连接上并发转发请求、分片响应和流式回复，流式输出期间仍可即时处理停止、审批和后续消息。浏览器和远程桌面端使用 HTTPS API，网页通过 SSE 接收流式回复。配对码由目标电脑验证，配对凭证保存在访问端；中继仅在内存中维护设备路由、设备名和在线状态，转发结束、超时或断线后及时清理。断线或中继重启后，目标电脑使用带随机抖动的退避策略自动重连，且不会自动重复执行已发出的写操作。
+
+官方部署的 HTTPS 反向代理（Nginx）会记录访问日志，包括来源 IP 和请求路径。
 
 ## 部署 Go 中继
 
@@ -132,6 +150,29 @@ Codex 使用 `app-server` 读取原会话。Claude Code 从本机 JSONL 读取�
 在桌面端 **设置 → 网络 → CLI 网络代理** 中，可以为 Naro 新启动的 CLI 设置 HTTP 或 HTTPS 代理，也适用于从其他设备发起的任务。清空地址并保存后，CLI 会继承 Naro 的启动环境。
 
 在目标电脑的 Naro 桌面端打开 **设置 → CLI 路径**，可分别为 Codex、Claude Code 和 Antigravity 粘贴可执行文件的绝对路径或用「选择文件」定位。保存后，新启动的 CLI 会优先使用设置的路径。清空某一项并保存后，Naro 会依次读取该引擎的启动环境变量（`NAROLINK_CODEX_CLI`、`NAROLINK_CLAUDE_CLI` 或 `NAROLINK_AGY_CLI`）和自动查找位置。
+
+## 源码目录
+
+| 想找的功能 | 代码入口 |
+| --- | --- |
+| 程序启动 | 创建共用的 `Service`，启动本机 HTTP 服务和桌面窗口。[`src/main.rs`](src/main.rs) |
+| 桌面界面与本机设置 | 窗口状态在 [`src/desktop.rs`](src/desktop.rs)，egui 界面在 [`src/desktop/ui.rs`](src/desktop/ui.rs)。CLI 路径和代理设置由 [`src/settings.rs`](src/settings.rs) 读写。 |
+| 浏览器工作台 | [`public/`](public/) 下的 [`index.html`](public/index.html)、[`app.js`](public/app.js) 和 [`style.css`](public/style.css) 分别负责页面结构、交互和样式。[`i18n.json`](public/i18n.json) 供桌面和网页共用。 |
+| 本机 HTTP API | 路由和请求处理在 [`src/web.rs`](src/web.rs)，设备配对校验在 [`src/web/auth.rs`](src/web/auth.rs)，流式回复在 [`src/web/stream.rs`](src/web/stream.rs)。 |
+| 两端共用的会话与任务逻辑 | 会话和历史记录的缓存、任务状态、排队、引导、停止和审批都从 [`src/service.rs`](src/service.rs) 看起。 |
+| 某个 CLI 的续聊、模型或协议 | [`src/engine.rs`](src/engine.rs) 定义通用类型并按引擎分发。[`src/engine/`](src/engine/) 下有 [`codex.rs`](src/engine/codex.rs)、[`claude.rs`](src/engine/claude.rs)、[`antigravity.rs`](src/engine/antigravity.rs) 三个适配文件。可执行文件查找和进程管理在 [`process.rs`](src/engine/process.rs)。 |
+| 跨设备连接 | 桌面端在 [`src/desktop/workspace.rs`](src/desktop/workspace.rs) 分发本机和远程操作，由 [`src/desktop/remote.rs`](src/desktop/remote.rs) 向远程设备发请求。目标电脑在 [`src/web/remote.rs`](src/web/remote.rs) 建立 WSS 连接并把请求送给本机 API。中继的设备路由和 WSS 转发分别在 [`relay.go`](relay.go) 和 [`relay_ws.go`](relay_ws.go)。 |
+| 工作区工具 | 桌面文件树在 [`src/desktop/file_tree.rs`](src/desktop/file_tree.rs)，文本预览的读取逻辑在 [`src/file_preview.rs`](src/file_preview.rs)，本机 Git 操作在 [`src/git.rs`](src/git.rs)。 |
+| 产品介绍页 | 独立的静态站点，包含产品介绍和下载入口。[`site/`](site/) |
+
+`public/` 会同时打包进 Rust 桌面端和 Go 中继。改完工作台页面后，本机网页从新版桌面程序加载，经中继访问的网页从新版中继加载。
+
+### 构建、测试与资源
+
+- 桌面端用 Cargo 构建，包名为 `narolink`。发布时使用 `Naro.app` 或 `Naro.exe`。[`Cargo.toml`](Cargo.toml) · [`scripts/package-macos.sh`](scripts/package-macos.sh)
+- 中继从仓库根目录用 Go 构建成 `naro-relay`，Docker 镜像包含中继服务和浏览器工作台。[`go.mod`](go.mod) · [`Dockerfile`](Dockerfile) · [`compose.yml`](compose.yml)
+- 端到端测试启动两个 Rust 实例和一个 Go 中继，通过模拟 CLI 验证跨设备流程。[`scripts/e2e.mjs`](scripts/e2e.mjs) · [`test/mock-cli.mjs`](test/mock-cli.mjs)
+- 图标、字体和 README 插图位于 [`assets/`](assets/)，本地修补的 Rust 依赖位于 [`vendor/`](vendor/)。`target/` 是 Cargo 的构建目录，`dist/` 存放本地打包产物。
 
 ## 从源码构建与测试
 

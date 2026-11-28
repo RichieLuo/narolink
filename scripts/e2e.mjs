@@ -5,7 +5,7 @@ import {mkdir, mkdtemp, readFile, rm, writeFile} from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import {fileURLToPath} from "node:url";
+import {fileURLToPath, pathToFileURL} from "node:url";
 
 const project = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const win = process.platform === "win32";
@@ -403,13 +403,15 @@ try {
       const reply = native.transcript.messages[1];
       assert.equal(reply.turn_id,"original-turn");
       assert.deepEqual(reply.work.steps.map(step => step.text),[
-        "First progress update","**Inspecting the repository**\n\nComparing `saved results` [Link](javascript:invalid)","Second progress update",
+        "First progress update [License](LICENSE)",
+        "**Inspecting the repository**\n\nComparing `saved results` [Link](javascript:invalid) [English](docs/README%20en.md)",
+        "Second progress update",
       ]);
       assert.doesNotMatch(JSON.stringify(reply.work),/raw reasoning/);
       const summaryHtml = reply.rendered.work_steps["stored-summary"];
       assert.match(summaryHtml,/<strong>Inspecting the repository<\/strong>/);
       assert.match(summaryHtml,/<code>saved results<\/code>/);
-      assert.doesNotMatch(summaryHtml,/javascript:|<a\b/);
+      assert.doesNotMatch(summaryHtml,/javascript:|href="[^"]+"[^>]*>Link/);
       assert.deepEqual(reply.work.changes.map(file => [file.path,file.added,file.removed]),[["example.js",2,1]]);
       assert.match(reply.rendered.html,/href="https:\/\/example\.com\/"/);
       assert.doesNotMatch(reply.rendered.html,/javascript:|href="[^\"]+"[^>]*>Outside/);
@@ -422,6 +424,7 @@ try {
       assert.deepEqual(Buffer.from(await asset.arrayBuffer()).subarray(0,8),fixture.subarray(0,8));
       const readmeLink = fileLink(reply.rendered.html,"README");
       assert.equal(fileLink(reply.rendered.html,"README relative"), readmeLink);
+      assert.equal(fileLink(reply.rendered.html,"README file URL"), readmeLink);
       assert.doesNotMatch(reply.rendered.html,/href="[^"]+"[^>]*>Outside text/);
       assert.equal((await anonymous.get(readmeLink)).status,401);
       assert.equal((await other.get(readmeLink)).status,404);
@@ -433,10 +436,22 @@ try {
       assert.match(document.html,/<h1>查看 Naro<\/h1>/);
       assert.doesNotMatch(document.html,/<script>/);
       assert.deepEqual(await json(desktop.get(readmeLink)),document);
-      const english = await json(phone.get(fileLink(document.html,"English")));
+      const englishLink = fileLink(document.html,"English");
+      assert.equal(fileLink(summaryHtml,"English"),englishLink);
+      const english = await json(phone.get(englishLink));
       assert.equal(english.name,"README en.md");
-      const license = await json(phone.get(fileLink(english.html,"License")));
+      const licenseLink = fileLink(english.html,"License");
+      const license = await json(phone.get(licenseLink));
       assert.deepEqual(license,{name:"LICENSE",text:"Example license\n"});
+      assert.deepEqual(reply.rendered.file_links,{
+        [readmePath.replaceAll("\\","/")+":12"]:readmeLink.split("/").at(-1),
+        [pathToFileURL(readmePath).href]:readmeLink.split("/").at(-1),
+        "README.md":readmeLink.split("/").at(-1),
+        "docs/README%20en.md":englishLink.split("/").at(-1),
+        "LICENSE":licenseLink.split("/").at(-1),
+      });
+      assert.deepEqual(document.file_links,{"docs/README%20en.md":englishLink.split("/").at(-1)});
+      assert.deepEqual(english.file_links,{"../LICENSE":licenseLink.split("/").at(-1)});
       await writeFile(readmePath,readme+"\nUpdated file\n");
       assert.equal((await json(phone.get(readmeLink))).text,readme+"\nUpdated file\n");
       const watch = endpoint + "?since=" + encodeURIComponent(native.transcript.revision);
@@ -589,7 +604,10 @@ try {
   const fileRunRoute = "/api/runs/"+fileRun.id;
   const liveFileEvents = await replyEvents(phone,fileRunRoute,AbortSignal.timeout(10000));
   const fileTurn = await liveFileEvents("snapshot", snap => snap.status === "complete");
-  const fileFromReply = await json(phone.get(fileLink(fileTurn.replies[0].rendered.html,"README")));
+  const liveReply = fileTurn.replies[0].rendered;
+  const liveReadmeLink = fileLink(liveReply.html,"README");
+  assert.deepEqual(liveReply.file_links,{"README.md":liveReadmeLink.split("/").at(-1)});
+  const fileFromReply = await json(phone.get(liveReadmeLink));
   assert.equal(fileFromReply.text,readme+"\nUpdated file\n");
   console.log("file preview: history and live replies, local and paired access, Markdown links, and reload verified");
 

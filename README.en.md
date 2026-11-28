@@ -4,15 +4,23 @@
 
 Pick up your Codex, Claude Code, and Antigravity sessions from a computer, phone, or tablet. Naro runs the CLI on the host computer. Connect from the Naro desktop app on another computer or from the web on a phone or tablet.
 
-## How the relay works
+[System architecture](#system-architecture) · [Get started](#get-started) · [Deploy the Go relay](#deploy-the-go-relay) · [Source layout](#source-layout) · [Build and test from source](#build-and-test-from-source)
 
-**The Naro Go relay does not persist user data.** Messages, attachments, file previews, and pairing records are never written to disk on the relay and only pass through in memory. Each CLI manages its session history on the host, and Naro reads project files from the host's workspace.
+## System architecture
 
-![Naro relay flow. The host opens a single outbound WSS connection and sends heartbeats when idle. The Go relay multiplexes HTTPS requests and SSE replies in memory.](assets/readme/relay.en.png)
+**Each session runs on the computer that holds the workspace.** Naro and the signed-in CLI run on this host. You can use its desktop window or browser directly. Phones and other computers connect to the same host through the Go relay.
 
-Each host opens **one outbound WSS connection** to the Go relay with no inbound ports required, sending only heartbeats while idle. The relay multiplexes concurrent requests, chunked responses, and streamed replies over that single connection by request ID, so stop, approval, and follow-up requests stay responsive during streaming. Browsers and remote desktops continue using the existing HTTPS API and SSE. The host verifies the pairing code and clients keep the pairing credential. The relay keeps only in-memory device routing, names, and online status, cleaning up pending requests immediately on completion, timeout, or disconnect. After a disconnect or relay restart, the host reconnects with jittered exponential backoff without automatically re-running side-effecting requests.
+![Naro system architecture. Remote devices reach the host's local API through the Go relay and WSS. The local browser connects to the same API. The API and desktop window share a task service that invokes the local CLI through adapters. Project files and CLI history live on the host.](assets/readme/architecture.en.png)
 
-The HTTPS reverse proxy (Nginx) in the official deployment keeps access logs that include source IP addresses and request paths.
+### How the host is organized
+
+- **Entry points.** The desktop window, local HTTP API, and WSS client belong to one Rust process. The window calls the task service directly. The local browser and requests forwarded by the relay go through the HTTP API.
+- **Task management.** The shared `Service` tracks run state and handles queuing, steering, stopping, and approvals. Devices connected to the same host can view and control the same run.
+- **Execution.** `engine` calls the appropriate CLI subprocess to start or resume a session and turns CLI output into task events. Project files and CLI session history live on the host.
+
+### Sending a message from a phone
+
+The phone browser sends the message to the Go relay over HTTPS. The relay finds the host by device ID and forwards the request over the WSS connection opened by that host. Naro passes it to the local API. The browser receives live CLI output through SSE, carried back over the same WSS connection and through the relay.
 
 ## Get started
 
@@ -31,6 +39,16 @@ Open an existing session from the sidebar, or choose an engine and a working dir
 - Attach up to four PNG, JPEG, GIF, or WebP images per message, with a combined source size of 12 MiB. The image picker is also available on desktop and web. The host validates and normalizes the images before passing them to the CLI. The browser can preview images from recent runs.
 
 To use the browser workspace on the host itself, open **Device connections → Open local web app** (**设备连接 → 打开本机网页**). The default address is `http://127.0.0.1:4318`.
+
+## How the relay works
+
+**The Naro Go relay does not persist user data.** Messages, attachments, file previews, and pairing records are never written to disk on the relay and only pass through in memory. Each CLI manages its session history on the host, and Naro reads project files from the host's workspace.
+
+![Naro relay flow. The host opens a single outbound WSS connection and sends heartbeats when idle. The Go relay multiplexes HTTPS requests and SSE replies in memory.](assets/readme/relay.en.png)
+
+Each host opens **one outbound WSS connection** to the Go relay with no inbound ports required, sending only heartbeats while idle. The relay multiplexes concurrent requests, chunked responses, and streamed replies over that single connection by request ID, so stop, approval, and follow-up requests stay responsive during streaming. Browsers and remote desktop clients use the HTTPS API. Browsers receive streamed replies through SSE. The host verifies the pairing code and clients keep the pairing credential. The relay keeps only in-memory device routing, names, and online status, cleaning up pending requests immediately on completion, timeout, or disconnect. After a disconnect or relay restart, the host reconnects with jittered exponential backoff without automatically re-running side-effecting requests.
+
+The HTTPS reverse proxy (Nginx) in the official deployment keeps access logs that include source IP addresses and request paths.
 
 ## Deploy the Go relay
 
@@ -132,6 +150,29 @@ In **Settings → CLI paths** on the host desktop, paste the absolute path or pi
 ## Desktop updates
 
 Naro checks for updates after launch. You can also check manually under **Settings → Software update**. Download an available release and confirm the restart after your running tasks finish. Users moving from `0.1.x` need to install the new `0.0.0` baseline once. See the [release process](README.md#发布桌面更新).
+
+## Source layout
+
+| What you're looking for | Where to look |
+| --- | --- |
+| App startup | Creates the shared `Service` and starts the local HTTP server and desktop window. [`src/main.rs`](src/main.rs) |
+| Desktop UI and local settings | Window state is in [`src/desktop.rs`](src/desktop.rs), and the egui interface is in [`src/desktop/ui.rs`](src/desktop/ui.rs). CLI paths and proxy settings are read and written in [`src/settings.rs`](src/settings.rs). |
+| Browser workspace | In [`public/`](public/), [`index.html`](public/index.html) defines the page, [`app.js`](public/app.js) handles interaction, and [`style.css`](public/style.css) sets the styles. The desktop and web apps share [`i18n.json`](public/i18n.json). |
+| Local HTTP API | Routes and handlers are in [`src/web.rs`](src/web.rs), pairing validation is in [`src/web/auth.rs`](src/web/auth.rs), and response streaming is in [`src/web/stream.rs`](src/web/stream.rs). |
+| Session and task behavior shared by both clients | Start with [`src/service.rs`](src/service.rs) for session caches, run state, queuing, steering, stopping, and approvals. |
+| CLI-specific resume, models, or protocol | [`src/engine.rs`](src/engine.rs) defines shared types and dispatches to the adapters in [`src/engine/`](src/engine/), including [`codex.rs`](src/engine/codex.rs), [`claude.rs`](src/engine/claude.rs), and [`antigravity.rs`](src/engine/antigravity.rs). Executable discovery and process management are in [`process.rs`](src/engine/process.rs). |
+| Remote connections | The desktop app dispatches local and remote operations in [`src/desktop/workspace.rs`](src/desktop/workspace.rs) and sends remote requests from [`src/desktop/remote.rs`](src/desktop/remote.rs). On the host, [`src/web/remote.rs`](src/web/remote.rs) opens the WSS connection and passes requests to the local API. On the relay, [`relay.go`](relay.go) handles device routing and [`relay_ws.go`](relay_ws.go) handles WSS forwarding. |
+| Workspace tools | The desktop file tree is in [`src/desktop/file_tree.rs`](src/desktop/file_tree.rs), text preview reads are in [`src/file_preview.rs`](src/file_preview.rs), and local Git operations are in [`src/git.rs`](src/git.rs). |
+| Product website | Standalone static site with the product overview and download links. [`site/`](site/) |
+
+The Rust desktop app and Go relay both bundle `public/`. Changes to the browser workspace reach the local web app through a new desktop build and the remote web app through a new relay build.
+
+### Builds, tests, and assets
+
+- Cargo builds the desktop app from the `narolink` package. It ships as `Naro.app` or `Naro.exe`. [`Cargo.toml`](Cargo.toml) · [`scripts/package-macos.sh`](scripts/package-macos.sh)
+- Go builds `naro-relay` from the repository root. The Docker image includes the relay service and the browser workspace. [`go.mod`](go.mod) · [`Dockerfile`](Dockerfile) · [`compose.yml`](compose.yml)
+- The end-to-end test runs two Rust instances and one Go relay, using a mock CLI to verify remote workflows. [`scripts/e2e.mjs`](scripts/e2e.mjs) · [`test/mock-cli.mjs`](test/mock-cli.mjs)
+- Icons, fonts, and README illustrations live in [`assets/`](assets/). Locally patched Rust dependencies live in [`vendor/`](vendor/). Cargo writes build output to `target/`, and packaging writes archives to `dist/`.
 
 ## Build and test from source
 

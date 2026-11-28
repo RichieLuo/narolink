@@ -1,6 +1,9 @@
-use crate::engine::attachments::{
-    HistoryImage, ImageAttachment, InlineImage, MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_SOURCE_BYTES,
-    UserAttachment,
+use crate::engine::{
+    attachments::{
+        HistoryImage, ImageAttachment, InlineImage, MAX_ENCODED_IMAGE_BYTES,
+        MAX_IMAGE_SOURCE_BYTES, UserAttachment,
+    },
+    work::{ReplyPart, StepKind, Work},
 };
 use crate::file_preview::{MAX_MARKDOWN_BYTES, local_file, read_file};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd, html};
@@ -23,6 +26,8 @@ pub(super) struct Rendered {
     sections: Vec<RenderedSection>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     work_steps: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    file_links: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -52,6 +57,8 @@ pub(super) struct FilePreview {
     html: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     code_html: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    file_links: BTreeMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -226,21 +233,24 @@ impl Previews {
         }
         let name = path.file_name()?.to_string_lossy().into_owned();
         let file = read_file(&path).map(|file| {
-            let html = (file.markdown && file.text.len() <= MAX_MARKDOWN_BYTES).then(|| {
+            let rendered = (file.markdown && file.text.len() <= MAX_MARKDOWN_BYTES).then(|| {
                 ReplyRenderer {
                     store: self,
                     workspace: Some(root),
                     cwd: path.parent().unwrap_or(&path).to_owned(),
                 }
                 .render(file.text.trim_start_matches('\u{feff}'), &[])
-                .html
             });
+            let (html, file_links) = rendered
+                .map(|rendered| (Some(rendered.html), rendered.file_links))
+                .unwrap_or_default();
             let code_html = crate::syntax::highlight_html(&file.text, &file.syntax);
             FilePreview {
                 name,
                 text: file.text,
                 html,
                 code_html,
+                file_links,
             }
         });
         Some(file)
@@ -254,33 +264,35 @@ pub(super) struct ReplyRenderer<'a> {
 }
 
 impl ReplyRenderer<'_> {
-    pub(super) fn render_reply(&self, text: &str, work: &crate::engine::work::Work) -> Rendered {
+    pub(super) fn render_reply(&self, text: &str, work: &Work) -> Rendered {
         let mut rendered = self.render(text, &work.images);
-        rendered.work_steps = work
+        for step in work
             .steps
             .iter()
-            .filter(|step| step.kind.is_thinking() && !step.text.trim().is_empty())
-            .map(|step| (step.id.clone(), self.render(&step.text, &[]).html))
-            .collect();
+            .filter(|step| step.kind.is_thinking() || step.kind == StepKind::Note)
+            .filter(|step| !step.text.trim().is_empty())
+        {
+            let mut document = self.render(&step.text, &[]);
+            rendered.file_links.append(&mut document.file_links);
+            if step.kind.is_thinking() {
+                rendered.work_steps.insert(step.id.clone(), document.html);
+            }
+        }
         if work
             .steps
             .iter()
             .any(|step| step.text_offset.is_some_and(|offset| offset > 0))
         {
-            rendered.sections = work
-                .reply_parts(text)
-                .into_iter()
-                .filter_map(|part| {
-                    if let crate::engine::work::ReplyPart::Text { offset, text } = part {
-                        Some(RenderedSection {
-                            offset,
-                            rendered: self.render(text, &[]),
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+            for part in work.reply_parts(text) {
+                if let ReplyPart::Text { offset, text } = part {
+                    let mut section = self.render(text, &[]);
+                    rendered.file_links.append(&mut section.file_links);
+                    rendered.sections.push(RenderedSection {
+                        offset,
+                        rendered: section,
+                    });
+                }
+            }
         }
         rendered
     }
@@ -291,6 +303,7 @@ impl ReplyRenderer<'_> {
             previews: Vec::new(),
             sections: Vec::new(),
             work_steps: BTreeMap::new(),
+            file_links: BTreeMap::new(),
         };
         let options =
             Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
@@ -345,7 +358,7 @@ impl ReplyRenderer<'_> {
                     id,
                     link_type,
                 }) => {
-                    let href = self.link(&dest_url, &mut rendered.previews, true);
+                    let href = self.link(&dest_url, &mut rendered, true);
                     links.push(href.is_some());
                     href.map(|href| {
                         Event::Start(Tag::Link {
@@ -363,7 +376,7 @@ impl ReplyRenderer<'_> {
                     ..
                 }) => {
                     let href = self
-                        .link(&dest_url, &mut rendered.previews, false)
+                        .link(&dest_url, &mut rendered, false)
                         .filter(|_| !links.contains(&true));
                     links.push(href.is_some());
                     href.map(|href| {
@@ -396,7 +409,7 @@ impl ReplyRenderer<'_> {
         rendered
     }
 
-    fn link(&self, target: &str, previews: &mut Vec<Preview>, allow_text: bool) -> Option<String> {
+    fn link(&self, target: &str, rendered: &mut Rendered, allow_text: bool) -> Option<String> {
         if target.len() > 4096 {
             return None;
         }
@@ -409,7 +422,7 @@ impl ReplyRenderer<'_> {
                 return Some(url.into());
             }
         }
-        self.image_link(target, previews).or_else(|| {
+        self.image_link(target, &mut rendered.previews).or_else(|| {
             if !allow_text {
                 return None;
             }
@@ -418,8 +431,10 @@ impl ReplyRenderer<'_> {
             if !path.starts_with(root) || supported_image(&path) || !path.is_file() {
                 return None;
             }
+            let key = self.store.file_key(root, &path);
+            rendered.file_links.insert(target.to_owned(), key.clone());
             Some(self.store.insert(
-                self.store.file_key(root, &path),
+                key,
                 PreviewSource::Text {
                     path,
                     root: root.to_owned(),

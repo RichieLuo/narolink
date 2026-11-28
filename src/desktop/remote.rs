@@ -10,6 +10,7 @@ use crate::{
         usage::UsageReport,
         work::Work,
     },
+    file_preview::MAX_FILE_BYTES,
     service::{Activity, FollowUpRequest, PermissionTarget, RunSummary, SendMode, Snapshot},
     web,
 };
@@ -21,7 +22,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{io::Read, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, io::Read, sync::Arc, time::Duration};
 
 const CONNECTION_ERROR: &str = "无法连接电脑。请确认 Naro 和远程网络仍在运行。";
 const RESPONSE_ERROR: &str = "电脑端返回的数据无效，请更新目标电脑上的 Naro。";
@@ -413,6 +414,18 @@ impl RemoteClient {
         self.image_bytes(&["previews", key])
     }
 
+    pub(super) fn file_preview(&self, key: &str) -> Result<RemoteFilePreview, String> {
+        if !valid_file_key(key) {
+            return Err(RESPONSE_ERROR.into());
+        }
+        let mut file: RemoteFilePreview = read_json(send(self.get(&["file-previews", key]))?)?;
+        if file.text.len() as u64 > MAX_FILE_BYTES {
+            return Err("文件超过 2 MiB，暂不支持在应用内预览。".into());
+        }
+        retain_file_links(&mut file.file_links);
+        Ok(file)
+    }
+
     fn image_bytes(&self, path: &[&str]) -> Result<Vec<u8>, String> {
         let response = send(self.get(path))?;
         if response
@@ -605,6 +618,30 @@ fn valid_preview_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
+fn valid_file_key(key: &str) -> bool {
+    key.len() == 64
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn retain_file_links(links: &mut BTreeMap<String, String>) {
+    links.retain(|target, key| {
+        !target.is_empty()
+            && target.len() <= 4096
+            && !target.chars().any(char::is_control)
+            && valid_file_key(key)
+    });
+}
+
+#[derive(Deserialize)]
+pub(super) struct RemoteFilePreview {
+    pub(super) name: String,
+    pub(super) text: String,
+    #[serde(default)]
+    pub(super) file_links: BTreeMap<String, String>,
+}
+
 #[derive(Deserialize)]
 struct PairStatus {
     paired: bool,
@@ -703,15 +740,20 @@ impl From<AttachmentPreview> for UserAttachment {
 struct RenderedReply {
     #[serde(default)]
     previews: Vec<AttachmentPreview>,
+    #[serde(default)]
+    file_links: BTreeMap<String, String>,
 }
 
 impl RenderedReply {
-    fn into_previews(self) -> Vec<UserAttachment> {
-        self.previews
+    fn apply_to_work(mut self, work: &mut Work) {
+        work.remote_previews = self
+            .previews
             .into_iter()
             .map(UserAttachment::from)
             .filter(|attachment| attachment.image.is_some())
-            .collect()
+            .collect();
+        retain_file_links(&mut self.file_links);
+        work.remote_file_links = self.file_links;
     }
 }
 
@@ -727,10 +769,9 @@ impl From<RemoteTranscript> for Transcript {
                     .into_iter()
                     .map(UserAttachment::from)
                     .collect();
-                message.work.remote_previews = entry
-                    .rendered
-                    .map(RenderedReply::into_previews)
-                    .unwrap_or_default();
+                if let Some(rendered) = entry.rendered {
+                    rendered.apply_to_work(&mut message.work);
+                }
                 message
             })
             .collect();
@@ -763,10 +804,9 @@ impl From<LiveSnapshot> for Snapshot {
         let mut snapshot = live.snapshot;
         for reply in live.replies {
             let mut work = reply.work;
-            work.remote_previews = reply
-                .rendered
-                .map(RenderedReply::into_previews)
-                .unwrap_or_default();
+            if let Some(rendered) = reply.rendered {
+                rendered.apply_to_work(&mut work);
+            }
             if let Some(after) = reply.after {
                 if let Some(entry) = snapshot
                     .follow_ups

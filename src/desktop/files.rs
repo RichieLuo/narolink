@@ -1,16 +1,17 @@
 //! Desktop UI for read-only file previews.
 use super::{
-    Language, markdown,
+    Language, RemoteClient, markdown,
     style::{Icon, Palette},
     syntax,
 };
-use crate::file_preview::{LoadResult, MAX_MARKDOWN_BYTES, TextFile, read_file};
+use crate::file_preview::{MAX_MARKDOWN_BYTES, TextFile, read_file};
 use eframe::egui::{
     self, Align, Align2, Button, FontId, Label, Layout, Margin, Rect, RichText, Stroke, TextEdit,
     Ui, pos2, vec2,
 };
 use egui_commonmark::CommonMarkCache;
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
 };
@@ -25,12 +26,23 @@ pub(super) struct FileViewer {
 }
 
 struct Preview {
-    path: PathBuf,
-    workspace: PathBuf,
-    inbox: Receiver<LoadResult>,
-    content: Option<LoadResult>,
+    source: PreviewSource,
+    inbox: Receiver<Result<PreviewContent, String>>,
+    content: Option<Result<PreviewContent, String>>,
     raw: bool,
     cache: CommonMarkCache,
+}
+
+#[derive(Clone)]
+enum PreviewSource {
+    Local { path: PathBuf, workspace: PathBuf },
+    Remote { client: RemoteClient, key: String },
+}
+
+struct PreviewContent {
+    file: TextFile,
+    remote_name: Option<String>,
+    file_links: BTreeMap<String, String>,
 }
 
 impl FileViewer {
@@ -44,7 +56,24 @@ impl FileViewer {
 
     pub(super) fn open(&mut self, ctx: &egui::Context, path: PathBuf, workspace: &Path) {
         self.from_tree = false;
-        self.preview = Some(Preview::new(ctx, path, workspace.to_owned()));
+        self.preview = Some(Preview::new(
+            ctx,
+            PreviewSource::Local {
+                path,
+                workspace: workspace.to_owned(),
+            },
+        ));
+    }
+
+    pub(super) fn open_remote(&mut self, ctx: &egui::Context, client: &RemoteClient, key: String) {
+        self.from_tree = false;
+        self.preview = Some(Preview::new(
+            ctx,
+            PreviewSource::Remote {
+                client: client.clone(),
+                key,
+            },
+        ));
     }
 
     /// Opens a file picked in the directory tree, with a way back to it.
@@ -77,10 +106,11 @@ impl FileViewer {
             .show(ctx, |ui| {
                 let language = Language::in_ui(ui);
                 let bounds = ui.max_rect();
-                let file = preview
+                let content = preview
                     .content
                     .as_ref()
                     .and_then(|result| result.as_ref().ok());
+                let file = content.map(|content| &content.file);
                 let can_render =
                     file.is_some_and(|file| file.markdown && file.text.len() <= MAX_MARKDOWN_BYTES);
                 ui.spacing_mut().item_spacing.y = 0.;
@@ -101,11 +131,12 @@ impl FileViewer {
                                 refresh = Icon::Refresh
                                     .button(ui, language.text("刷新文件"), palette.muted)
                                     .clicked();
-                                if Icon::Folder
-                                    .button(ui, language.text("在文件夹中显示"), palette.muted)
-                                    .clicked()
+                                if let PreviewSource::Local { path, .. } = &preview.source
+                                    && Icon::Folder
+                                        .button(ui, language.text("在文件夹中显示"), palette.muted)
+                                        .clicked()
                                 {
-                                    let path = preview.path.clone();
+                                    let path = path.clone();
                                     std::thread::spawn(move || markdown::reveal_file(&path));
                                 }
                                 if let Some(file) = file
@@ -143,11 +174,16 @@ impl FileViewer {
                                     let (rect, _) = ui
                                         .allocate_exact_size(vec2(16., 16.), egui::Sense::hover());
                                     icon.paint(ui.painter(), rect.center(), palette.accent);
-                                    let name = preview
-                                        .path
-                                        .file_name()
-                                        .unwrap_or(preview.path.as_os_str())
-                                        .to_string_lossy();
+                                    let name = match &preview.source {
+                                        PreviewSource::Local { path, .. } => path
+                                            .file_name()
+                                            .unwrap_or(path.as_os_str())
+                                            .to_string_lossy(),
+                                        PreviewSource::Remote { .. } => content
+                                            .and_then(|content| content.remote_name.as_deref())
+                                            .unwrap_or_else(|| language.text("文件预览"))
+                                            .into(),
+                                    };
                                     ui.add(
                                         Label::new(
                                             RichText::new(name)
@@ -161,13 +197,21 @@ impl FileViewer {
                             },
                         );
                     });
-                let directory = preview.path.parent().unwrap_or(&preview.path);
-                let relative_directory = directory
-                    .strip_prefix(&preview.workspace)
-                    .ok()
-                    .and_then(|_| preview.workspace.parent())
-                    .and_then(|parent| directory.strip_prefix(parent).ok())
-                    .unwrap_or(directory);
+                let (location, tooltip) = match &preview.source {
+                    PreviewSource::Local { path, workspace } => {
+                        let directory = path.parent().unwrap_or(path);
+                        let relative_directory = directory
+                            .strip_prefix(workspace)
+                            .ok()
+                            .and_then(|_| workspace.parent())
+                            .and_then(|parent| directory.strip_prefix(parent).ok())
+                            .unwrap_or(directory);
+                        (relative_directory.to_string_lossy(), path.to_string_lossy())
+                    }
+                    PreviewSource::Remote { client, .. } => {
+                        (client.name().into(), client.name().into())
+                    }
+                };
                 let details = egui::Frame::new()
                     .inner_margin(Margin::symmetric(14, 4))
                     .show(ui, |ui| {
@@ -198,14 +242,12 @@ impl FileViewer {
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                     ui.add(
                                         Label::new(
-                                            RichText::new(relative_directory.to_string_lossy())
-                                                .size(11.5)
-                                                .color(palette.muted),
+                                            RichText::new(location).size(11.5).color(palette.muted),
                                         )
                                         .truncate()
                                         .show_tooltip_when_elided(false),
                                     )
-                                    .on_hover_text(preview.path.to_string_lossy());
+                                    .on_hover_text(tooltip);
                                 });
                             },
                         );
@@ -233,7 +275,8 @@ impl FileViewer {
                                 ui.label(RichText::new(language.text(error)).color(palette.warn));
                             });
                     }
-                    Some(Ok(file)) => {
+                    Some(Ok(content)) => {
+                        let file = &content.file;
                         if file.markdown && !can_render {
                             egui::Frame::new()
                                 .fill(palette.canvas)
@@ -248,7 +291,11 @@ impl FileViewer {
                                 });
                         }
                         let raw = !can_render || preview.raw;
-                        ui.push_id((&preview.path, raw), |ui| {
+                        let file_id = match &preview.source {
+                            PreviewSource::Local { path, .. } => egui::Id::new(path),
+                            PreviewSource::Remote { key, .. } => egui::Id::new(key),
+                        };
+                        ui.push_id((file_id, raw), |ui| {
                             ui.set_clip_rect(
                                 ui.clip_rect().intersect(ui.available_rect_before_wrap()),
                             );
@@ -262,12 +309,33 @@ impl FileViewer {
                                         egui::Frame::new()
                                             .inner_margin(Margin::symmetric(24, 17))
                                             .show(ui, |ui| {
-                                                navigate = markdown::render(
-                                                    ui,
-                                                    &mut preview.cache,
-                                                    file.text.trim_start_matches('\u{feff}'),
-                                                    directory,
-                                                );
+                                                let text = file.text.trim_start_matches('\u{feff}');
+                                                navigate = match &preview.source {
+                                                    PreviewSource::Local { path, workspace } => {
+                                                        markdown::render(
+                                                            ui,
+                                                            &mut preview.cache,
+                                                            text,
+                                                            path.parent().unwrap_or(path),
+                                                        )
+                                                        .map(|path| PreviewSource::Local {
+                                                            path,
+                                                            workspace: workspace.clone(),
+                                                        })
+                                                    }
+                                                    PreviewSource::Remote { client, .. } => {
+                                                        markdown::render_remote(
+                                                            ui,
+                                                            &mut preview.cache,
+                                                            text,
+                                                            &content.file_links,
+                                                        )
+                                                        .map(|key| PreviewSource::Remote {
+                                                            client: client.clone(),
+                                                            key,
+                                                        })
+                                                    }
+                                                };
                                             });
                                     },
                                 );
@@ -283,11 +351,11 @@ impl FileViewer {
             });
         if close {
             self.preview = None;
-        } else if let Some(path) = navigate {
-            self.preview = Some(Preview::new(ctx, path, preview.workspace.clone()));
+        } else if let Some(source) = navigate {
+            self.preview = Some(Preview::new(ctx, source));
         } else if refresh {
             // Replacing the receiver discards any stale result from the previous load.
-            let mut next = Preview::new(ctx, preview.path.clone(), preview.workspace.clone());
+            let mut next = Preview::new(ctx, preview.source.clone());
             next.raw = preview.raw;
             self.preview = Some(next);
         }
@@ -296,17 +364,16 @@ impl FileViewer {
 }
 
 impl Preview {
-    fn new(ctx: &egui::Context, path: PathBuf, workspace: PathBuf) -> Self {
+    fn new(ctx: &egui::Context, source: PreviewSource) -> Self {
         let (outbox, inbox) = mpsc::channel();
-        let source = path.clone();
+        let source_to_load = source.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = outbox.send(read_file(&source));
+            let _ = outbox.send(source_to_load.load());
             ctx.request_repaint();
         });
         Self {
-            path,
-            workspace,
+            source,
             inbox,
             content: None,
             raw: false,
@@ -318,9 +385,37 @@ impl Preview {
         match self.inbox.try_recv() {
             Ok(result) => self.content = Some(result),
             Err(mpsc::TryRecvError::Disconnected) if self.content.is_none() => {
-                self.content = Some(Err("无法读取文件，请刷新重试。"));
+                self.content = Some(Err("无法读取文件，请刷新重试。".into()));
             }
             _ => {}
+        }
+    }
+}
+
+impl PreviewSource {
+    fn load(self) -> Result<PreviewContent, String> {
+        match self {
+            Self::Local { path, .. } => read_file(&path)
+                .map(PreviewContent::local)
+                .map_err(str::to_owned),
+            Self::Remote { client, key } => {
+                let preview = client.file_preview(&key)?;
+                Ok(PreviewContent {
+                    file: TextFile::from_text(preview.text, Path::new(&preview.name)),
+                    remote_name: Some(preview.name),
+                    file_links: preview.file_links,
+                })
+            }
+        }
+    }
+}
+
+impl PreviewContent {
+    fn local(file: TextFile) -> Self {
+        Self {
+            file,
+            remote_name: None,
+            file_links: BTreeMap::new(),
         }
     }
 }
@@ -407,17 +502,19 @@ fn render_source(ui: &mut Ui, file: &TextFile) -> egui::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file_preview::tests::TestDirectory;
+    use crate::file_preview::{LoadResult, tests::TestDirectory};
     use egui::{Event, Pos2, Rect, vec2};
 
     fn loaded_viewer(path: PathBuf, result: LoadResult) -> FileViewer {
         let (_, inbox) = mpsc::channel();
         FileViewer {
             preview: Some(Preview {
-                path,
-                workspace: PathBuf::new(),
+                source: PreviewSource::Local {
+                    path,
+                    workspace: PathBuf::new(),
+                },
                 inbox,
-                content: Some(result),
+                content: Some(result.map(PreviewContent::local).map_err(str::to_owned)),
                 raw: false,
                 cache: CommonMarkCache::default(),
             }),
@@ -510,7 +607,10 @@ mod tests {
         let rendered = frame(&ctx, &mut viewer, vec![]);
         let next = text_position(&rendered, "Next file");
         let _ = frame(&ctx, &mut viewer, click(next));
-        assert_eq!(viewer.preview.as_ref().unwrap().path, dir.0.join(target));
+        assert!(matches!(
+            &viewer.preview.as_ref().unwrap().source,
+            PreviewSource::Local { path, .. } if path == &dir.0.join(target)
+        ));
         // A missing target still stays inside Naro with an error, never an OS open.
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     }
@@ -656,9 +756,16 @@ mod tests {
             .unwrap();
         preview.content = Some(result);
         preview.poll();
-        assert_eq!(preview.path, next);
+        assert!(matches!(&preview.source, PreviewSource::Local { path, .. } if path == &next));
         assert_eq!(
-            preview.content.as_ref().unwrap().as_ref().unwrap().text,
+            preview
+                .content
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .file
+                .text,
             "new source"
         );
         viewer.preview = None;

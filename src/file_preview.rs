@@ -18,6 +18,23 @@ pub(crate) struct TextFile {
     pub lines: usize,
 }
 
+impl TextFile {
+    pub(crate) fn from_text(text: String, path: &Path) -> Self {
+        let syntax = crate::syntax::detect_syntax_from_path(path);
+        let markdown = matches!(
+            syntax.as_str(),
+            "md" | "markdown" | "mdown" | "mkd" | "mkdn"
+        );
+        let lines = text.bytes().filter(|&byte| byte == b'\n').count() + 1;
+        Self {
+            text,
+            markdown,
+            syntax,
+            lines,
+        }
+    }
+}
+
 pub(crate) fn read_file(path: &Path) -> LoadResult {
     // Reject directories and special files before open (e.g. FIFOs can block).
     let metadata = std::fs::metadata(path).map_err(file_error)?;
@@ -49,18 +66,7 @@ pub(crate) fn read_file(path: &Path) -> LoadResult {
     {
         return Err("此文件是二进制文件，暂不支持预览。");
     }
-    let syntax = crate::syntax::detect_syntax_from_path(path);
-    let markdown = matches!(
-        syntax.as_str(),
-        "md" | "markdown" | "mdown" | "mkd" | "mkdn"
-    );
-    let lines = text.bytes().filter(|&byte| byte == b'\n').count() + 1;
-    Ok(TextFile {
-        text,
-        markdown,
-        syntax,
-        lines,
-    })
+    Ok(TextFile::from_text(text, path))
 }
 
 fn file_error(error: std::io::Error) -> &'static str {
