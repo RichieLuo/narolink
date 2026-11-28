@@ -16,7 +16,7 @@ The HTTPS reverse proxy (Nginx) in the official deployment keeps access logs tha
 
 ## Get started
 
-Install and sign in to the CLI you want to use on the host computer (`codex`, `claude`, or `agy`). On macOS, extract the archive and open `Naro.app`. On Windows, run `Naro.exe`. You can also build from source using the instructions below.
+Install and sign in to the CLI you want to use on the host computer (`codex`, `claude`, or `agy`). On macOS, extract the archive and move `Naro.app` to Applications before opening it. On Windows, run `Naro.exe` from a writable folder. You can also build from source using the instructions below.
 
 Open an existing session from the sidebar, or choose an engine and a working directory on the host to start a new session. Naro groups Codex sessions by registered project and includes older sessions when it can identify their project from the working directory. Click **＋** beside a project to start a session there. For a project with multiple folders, choose the folder to work in. Claude Code and Antigravity can use previously opened working directories.
 
@@ -37,18 +37,26 @@ To use the browser workspace on the host itself, open **Device connections → O
 Build the relay with Go 1.23 or later. Set its public HTTPS address and connection token on the server. The example uses OpenSSL to generate a random token. Replace the example domain with your own and enter the same token on each host you want to connect. Keep the token in the relay service's environment configuration so hosts can reconnect after a restart.
 
 ```sh
-go build -trimpath -ldflags="-s -w" -o narolink-relay .
-export NAROLINK_PUBLIC_URL=https://naro.example.com
-export NAROLINK_RELAY_TOKEN="$(openssl rand -hex 32)"
-./narolink-relay
+go build -trimpath -ldflags="-s -w" -o naro-relay .
+export NARO_PUBLIC_URL=https://naro.example.com
+export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
+./naro-relay
+```
+
+You can also deploy the relay with Docker using the root `Dockerfile` and `compose.yml` (a read-only, non-root `naro-relay` `scratch` image bound to `127.0.0.1:7319` by default):
+
+```sh
+export NARO_PUBLIC_URL=https://naro.example.com
+export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
+docker compose up -d --build
 ```
 
 | Environment variable | Purpose |
 | --- | --- |
-| `NAROLINK_PUBLIC_URL` | Public HTTPS origin of the relay, consisting of the scheme, host, and optional port |
-| `NAROLINK_RELAY_TOKEN` | Random token shared by the relay and the hosts. Use 32 to 512 ASCII characters with no whitespace |
-| `NAROLINK_RELAY_ADDR` | Relay listen address. Defaults to `127.0.0.1:7319` |
-| `NAROLINK_TLS_CERT`, `NAROLINK_TLS_KEY` | Optional. Set both the certificate and key files to serve HTTPS directly from Go |
+| `NARO_PUBLIC_URL` | Public HTTPS origin of the relay, consisting of the scheme, host, and optional port |
+| `NARO_RELAY_TOKEN` | Random token shared by the relay and the hosts. Use 32 to 512 ASCII characters with no whitespace |
+| `NARO_RELAY_ADDR` | Relay listen address. Defaults to `127.0.0.1:7319` |
+| `NARO_TLS_CERT`, `NARO_TLS_KEY` | Optional. Set both the certificate and key files to serve HTTPS directly from Go |
 
 If you use an HTTPS reverse proxy, preserve the original `Host` header, enable HTTP/1.1 WebSocket upgrades (`Upgrade` / `Connection`), allow request bodies of at least 36 MiB, and disable response buffering for WSS and SSE. Here is an Nginx configuration for a single Go relay service:
 
@@ -119,7 +127,11 @@ Use **Permissions** (**权限**) next to the model button in the composer to set
 
 Set an HTTP or HTTPS proxy under **Settings → Network → CLI proxy** in the desktop app. It applies to CLI processes Naro launches after you save it, including runs started from other devices. Clear the address and save to inherit Naro's launch environment again.
 
-If Naro cannot find a CLI, set `NAROLINK_CODEX_CLI`, `NAROLINK_CLAUDE_CLI`, or `NAROLINK_AGY_CLI` to the executable's absolute path in Naro's launch environment.
+In **Settings → CLI paths** on the host desktop, paste the absolute path or pick the executable for Codex, Claude Code, and Antigravity individually. Naro uses saved paths for new CLI processes. Clear a field and save to use its launch environment variable (`NAROLINK_CODEX_CLI`, `NAROLINK_CLAUDE_CLI`, or `NAROLINK_AGY_CLI`) and automatic discovery again.
+
+## Desktop updates
+
+Naro checks for updates after launch. You can also check manually under **Settings → Software update**. Download an available release and confirm the restart after your running tasks finish. Users moving from `0.1.x` need to install the new `0.0.0` baseline once. See the [release process](README.md#发布桌面更新).
 
 ## Build and test from source
 

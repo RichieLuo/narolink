@@ -5,6 +5,7 @@ mod codex;
 mod operations;
 mod process;
 pub use operations::{SessionAction, occurrences, search, session_action};
+pub use process::validate_cli_path;
 pub fn codex_session(id: &str) -> Result<Session, String> {
     codex::read_session(id)
 }

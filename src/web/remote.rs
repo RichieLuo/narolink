@@ -570,7 +570,11 @@ impl Remote {
                         None => break,
                     },
                 };
-                if writer.write_frame(frame.opcode, &frame.payload).await.is_err() {
+                if writer
+                    .write_frame(frame.opcode, &frame.payload)
+                    .await
+                    .is_err()
+                {
                     let _ = writer_cancel_notify.send(true);
                     break;
                 }
@@ -915,12 +919,8 @@ impl Remote {
                                     let _ = outbound.send_data(eof_frame).await;
                                     return;
                                 }
-                                let frame = encode_bin_frame(
-                                    WS_BIN_STREAM_CHUNK,
-                                    0,
-                                    &work.raw_id,
-                                    piece,
-                                );
+                                let frame =
+                                    encode_bin_frame(WS_BIN_STREAM_CHUNK, 0, &work.raw_id, piece);
                                 if !outbound.send_data(frame).await {
                                     return;
                                 }
@@ -1011,8 +1011,7 @@ impl Remote {
                             {
                                 return;
                             }
-                            let frame =
-                                encode_bin_frame(WS_BIN_RES_CHUNK, 0, &work.raw_id, piece);
+                            let frame = encode_bin_frame(WS_BIN_RES_CHUNK, 0, &work.raw_id, piece);
                             if !outbound.send_data(frame).await {
                                 return;
                             }

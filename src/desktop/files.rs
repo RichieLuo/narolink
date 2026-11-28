@@ -1,7 +1,8 @@
 //! Desktop UI for read-only file previews.
 use super::{
     Language, markdown,
-    style::{Icon, Palette, lerp_color},
+    style::{Icon, Palette},
+    syntax,
 };
 use crate::file_preview::{LoadResult, MAX_MARKDOWN_BYTES, TextFile, read_file};
 use eframe::egui::{
@@ -9,13 +10,11 @@ use eframe::egui::{
     Ui, pos2, vec2,
 };
 use egui_commonmark::CommonMarkCache;
-use egui_extras::syntax_highlighting::{self, CodeTheme};
 use std::{
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
 };
 
-const MAX_HIGHLIGHT_BYTES: usize = 128 * 1024;
 const CODE_FONT_SIZE: f32 = 13.;
 const CODE_LINE_HEIGHT: f32 = 19.;
 
@@ -308,32 +307,16 @@ fn render_source(ui: &mut Ui, file: &TextFile) -> egui::Response {
             let clip = ui.clip_rect();
             ui.set_clip_rect(clip.with_min_x(gutter_right));
             let font = FontId::monospace(CODE_FONT_SIZE);
-            let theme = CodeTheme::from_style(ui.style());
+            let dark_mode = ui.visuals().dark_mode;
             let mut layouter = |ui: &Ui, buffer: &dyn egui::TextBuffer, _: f32| {
-                let mut job = if file.text.len() <= MAX_HIGHLIGHT_BYTES && !file.text.is_empty() {
-                    syntax_highlighting::highlight(
-                        ui.ctx(),
-                        ui.style(),
-                        &theme,
-                        buffer.as_str(),
-                        &file.syntax,
-                    )
-                } else {
-                    egui::text::LayoutJob::simple(
-                        buffer.as_str().to_owned(),
-                        font.clone(),
-                        palette.ink,
-                        f32::INFINITY,
-                    )
-                };
-                job.first_row_min_height = CODE_LINE_HEIGHT;
-                for section in &mut job.sections {
-                    section.format.line_height = Some(CODE_LINE_HEIGHT);
-                    section.format.color = lerp_color(section.format.color, palette.ink, 0.28);
-                    if !section.format.underline.is_empty() {
-                        section.format.underline.color = section.format.color;
-                    }
-                }
+                let job = syntax::highlight_job(
+                    ui.ctx(),
+                    buffer.as_str(),
+                    &file.syntax,
+                    CODE_FONT_SIZE,
+                    CODE_LINE_HEIGHT,
+                    dark_mode,
+                );
                 ui.fonts_mut(|fonts| fonts.layout_job(job))
             };
             // The immutable buffer keeps text selection and copying available.
@@ -650,5 +633,55 @@ mod tests {
         viewer.preview = None;
         assert!(!viewer.is_open());
         frame(&ctx, &mut viewer, vec![]);
+    }
+
+    #[test]
+    fn source_viewer_applies_distinct_syntax_colors_in_light_and_dark_themes() {
+        use std::collections::HashSet;
+
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = egui::Context::default();
+            super::super::style::setup(&ctx);
+            ctx.set_theme(theme);
+            for (name, source) in [
+                (
+                    "app.ts",
+                    "export interface User { id: number; name: string }\n// comment\nconst active = true;\n",
+                ),
+                (
+                    "Cargo.toml",
+                    "[package]\nname = \"narolink\"\nversion = \"0.0.0\"\n# comment\nstrip = true\n",
+                ),
+                (
+                    "main.rs",
+                    "pub fn main() {\n    // hello\n    let count: usize = 42;\n    println!(\"{count}\");\n}\n",
+                ),
+            ] {
+                let dir = TestDirectory::new();
+                let path = dir.file(name, source);
+                let mut viewer = loaded_viewer(path.clone(), read_file(&path));
+                let _ = frame(&ctx, &mut viewer, vec![]);
+                let output = frame(&ctx, &mut viewer, vec![]);
+                let code = output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.text() == source => Some(text),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("missing rendered source for {name}"));
+                let colors: HashSet<_> = code
+                    .galley
+                    .job
+                    .sections
+                    .iter()
+                    .map(|section| section.format.color)
+                    .collect();
+                assert!(
+                    colors.len() >= 4,
+                    "expected syntax colors for {name} in {theme:?}, got {colors:?}"
+                );
+            }
+        }
     }
 }

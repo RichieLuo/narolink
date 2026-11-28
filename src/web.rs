@@ -503,6 +503,8 @@ struct GitDiffQuery {
     scope: crate::git::GitDiffScope,
     path: Option<String>,
     commit: Option<String>,
+    #[serde(default)]
+    full_context: bool,
 }
 
 async fn git_diff(
@@ -513,8 +515,13 @@ async fn git_diff(
         scope: query.scope,
         path: query.path,
         commit: query.commit,
+        full_context: query.full_context,
     };
-    blocking(move || web.service.git_diff(std::path::Path::new(&query.cwd), &request)).await
+    blocking(move || {
+        web.service
+            .git_diff(std::path::Path::new(&query.cwd), &request)
+    })
+    .await
 }
 
 #[derive(Deserialize)]
@@ -528,8 +535,11 @@ async fn git_action(
     State(web): State<Web>,
     Json(request): Json<GitActionRequest>,
 ) -> Result<Json<crate::git::GitActionResult>, ApiError> {
-    blocking(move || web.service.git_action(std::path::Path::new(&request.cwd), &request.action))
-        .await
+    blocking(move || {
+        web.service
+            .git_action(std::path::Path::new(&request.cwd), &request.action)
+    })
+    .await
 }
 
 #[derive(Deserialize)]

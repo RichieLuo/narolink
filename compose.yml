@@ -1,0 +1,16 @@
+services:
+  relay:
+    image: naro-relay:latest
+    build: .
+    restart: unless-stopped
+    environment:
+      NARO_PUBLIC_URL: ${NARO_PUBLIC_URL:?set NARO_PUBLIC_URL, e.g. https://naro.example.com}
+      NARO_RELAY_TOKEN: ${NARO_RELAY_TOKEN:?set NARO_RELAY_TOKEN (32-512 chars)}
+      NARO_RELAY_ADDR: 0.0.0.0:7319
+    ports:
+      - "${NARO_BIND_ADDR:-127.0.0.1:7319}:7319"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

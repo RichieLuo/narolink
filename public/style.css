@@ -26,6 +26,17 @@
   --diff-added-bg: #e9f6ed;
   --diff-removed-ink: #9d3040;
   --diff-removed-bg: #fcecee;
+  --tok-comment: #6e7781;
+  --tok-keyword: #cf222e;
+  --tok-type: #953800;
+  --tok-fn: #8250df;
+  --tok-string: #116329;
+  --tok-number: #0550ae;
+  --tok-constant: #0550ae;
+  --tok-property: #0e7490;
+  --tok-tag: #cf222e;
+  --tok-operator: #57606a;
+  --tok-escape: #953800;
   --backdrop: #33415538;
   --shadow: #33415518;
   --shadow-strong: #3341551e;
@@ -73,6 +84,17 @@
   --diff-added-bg: #1c3428;
   --diff-removed-ink: #ffb2bc;
   --diff-removed-bg: #3e252e;
+  --tok-comment: #8b949e;
+  --tok-keyword: #ff7b72;
+  --tok-type: #ffa657;
+  --tok-fn: #d2a8ff;
+  --tok-string: #7ee787;
+  --tok-number: #79c0ff;
+  --tok-constant: #79c0ff;
+  --tok-property: #7dd3fc;
+  --tok-tag: #ff7b72;
+  --tok-operator: #a6b3c5;
+  --tok-escape: #ffa657;
   --backdrop: #0000008c;
   --shadow: #00000050;
   --shadow-strong: #00000066;
@@ -733,6 +755,19 @@ button.primary, button.secondary {
   border-bottom: 1px solid var(--line); border-radius: 9px 9px 0 0; background: var(--paper);
 }
 .message-text .code-block > pre { margin: 0; border: 0; border-radius: 0 0 9px 9px; }
+.tok-comment { color: var(--tok-comment); font-style: italic; }
+.tok-keyword { color: var(--tok-keyword); }
+.tok-type { color: var(--tok-type); }
+.tok-fn { color: var(--tok-fn); }
+.tok-string { color: var(--tok-string); }
+.tok-number { color: var(--tok-number); }
+.tok-constant { color: var(--tok-constant); }
+.tok-property { color: var(--tok-property); }
+.tok-tag { color: var(--tok-tag); }
+.tok-operator { color: var(--tok-operator); }
+.tok-escape { color: var(--tok-escape); }
+.tok-added { color: var(--diff-added-ink); }
+.tok-removed { color: var(--diff-removed-ink); }
 .message-copy {
   display: inline-grid; place-items: center; width: 32px; min-height: 32px; padding: 0;
   margin: .22rem 0 0 -.35rem; background: transparent; color: var(--muted); border: 0; border-radius: 8px;

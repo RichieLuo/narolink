@@ -113,16 +113,23 @@ func newDesktop(key [32]byte) *desktop {
 	}
 }
 
-func main() {
-	token := os.Getenv("NAROLINK_RELAY_TOKEN")
-	if len(token) < 32 {
-		log.Fatal("NAROLINK_RELAY_TOKEN must contain at least 32 characters")
+func envVar(primary, legacy string) string {
+	if value := os.Getenv(primary); value != "" {
+		return value
 	}
-	gateway, err := newRelay(os.Getenv("NAROLINK_PUBLIC_URL"), token)
+	return os.Getenv(legacy)
+}
+
+func main() {
+	token := envVar("NARO_RELAY_TOKEN", "NAROLINK_RELAY_TOKEN")
+	if len(token) < 32 {
+		log.Fatal("NARO_RELAY_TOKEN must contain at least 32 characters")
+	}
+	gateway, err := newRelay(envVar("NARO_PUBLIC_URL", "NAROLINK_PUBLIC_URL"), token)
 	if err != nil {
 		log.Fatal(err)
 	}
-	address := os.Getenv("NAROLINK_RELAY_ADDR")
+	address := envVar("NARO_RELAY_ADDR", "NAROLINK_RELAY_ADDR")
 	if address == "" {
 		address = "127.0.0.1:7319"
 	}
@@ -131,13 +138,13 @@ func main() {
 		ReadTimeout: 40 * time.Second, WriteTimeout: 45 * time.Second,
 		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
 	}
-	cert, key := os.Getenv("NAROLINK_TLS_CERT"), os.Getenv("NAROLINK_TLS_KEY")
+	cert, key := envVar("NARO_TLS_CERT", "NAROLINK_TLS_CERT"), envVar("NARO_TLS_KEY", "NAROLINK_TLS_KEY")
 	log.Printf("Naro relay listening on %s for %s", address, gateway.origin)
 	if cert != "" && key != "" {
 		log.Fatal(server.ListenAndServeTLS(cert, key))
 	}
 	if cert != "" || key != "" {
-		log.Fatal("Supply both NAROLINK_TLS_CERT and NAROLINK_TLS_KEY")
+		log.Fatal("Supply both NARO_TLS_CERT and NARO_TLS_KEY")
 	}
 	log.Fatal(server.ListenAndServe())
 }
@@ -146,7 +153,7 @@ func newRelay(publicURL, token string) (*relay, error) {
 	origin, err := url.Parse(publicURL)
 	if err != nil || origin.Host == "" || origin.User != nil || (origin.Path != "" && origin.Path != "/") ||
 		origin.RawQuery != "" || origin.Fragment != "" || origin.ForceQuery {
-		return nil, fmt.Errorf("set NAROLINK_PUBLIC_URL to a standalone HTTPS origin")
+		return nil, fmt.Errorf("set NARO_PUBLIC_URL to a standalone HTTPS origin")
 	}
 	secure := origin.Scheme == "https"
 	if !secure && (origin.Scheme != "http" || !isLoopback(origin.Hostname())) {

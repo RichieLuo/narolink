@@ -112,6 +112,8 @@ pub struct GitDiffRequest {
     pub path: Option<String>,
     #[serde(default)]
     pub commit: Option<String>,
+    #[serde(default)]
+    pub full_context: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,27 +306,11 @@ pub fn diff(cwd: &Path, request: &GitDiffRequest) -> Result<GitDiff, String> {
     match request.scope {
         GitDiffScope::Staged => {
             let path = validate_rel_path(request.path.as_deref().unwrap_or_default())?;
-            let output = run_git(
-                &root,
-                &["diff", "--cached", "--no-color", "--no-ext-diff", "--", &path],
-                RunOptions::read_only(),
-            )?;
-            if !output.success {
-                return Err(format_git_error("无法读取已暂存差异", &output));
-            }
-            Ok(build_diff(path, &output.stdout, output.stdout_truncated))
+            diff_file(&root, &path, true, request.full_context)
         }
         GitDiffScope::Unstaged => {
             let path = validate_rel_path(request.path.as_deref().unwrap_or_default())?;
-            let output = run_git(
-                &root,
-                &["diff", "--no-color", "--no-ext-diff", "--", &path],
-                RunOptions::read_only(),
-            )?;
-            if !output.success {
-                return Err(format_git_error("无法读取文件差异", &output));
-            }
-            Ok(build_diff(path, &output.stdout, output.stdout_truncated))
+            diff_file(&root, &path, false, request.full_context)
         }
         GitDiffScope::Untracked => {
             let path = validate_rel_path(request.path.as_deref().unwrap_or_default())?;
@@ -353,6 +339,44 @@ pub fn diff(cwd: &Path, request: &GitDiffRequest) -> Result<GitDiff, String> {
             Ok(build_diff(title, &output.stdout, output.stdout_truncated))
         }
     }
+}
+
+fn diff_file(root: &Path, path: &str, cached: bool, full_context: bool) -> Result<GitDiff, String> {
+    let err_prefix = if cached {
+        "无法读取已暂存差异"
+    } else {
+        "无法读取文件差异"
+    };
+    if full_context {
+        let mut args = vec!["diff", "--no-color", "--no-ext-diff", "-U99999"];
+        if cached {
+            args.insert(1, "--cached");
+        }
+        args.push("--");
+        args.push(path);
+        let output = run_git(root, &args, RunOptions::read_only())?;
+        if !output.success {
+            return Err(format_git_error(err_prefix, &output));
+        }
+        if !output.stdout_truncated && output.stdout.len() <= MAX_DIFF_BYTES {
+            return Ok(build_diff(path.to_owned(), &output.stdout, false));
+        }
+    }
+    let mut args = vec!["diff", "--no-color", "--no-ext-diff"];
+    if cached {
+        args.insert(1, "--cached");
+    }
+    args.push("--");
+    args.push(path);
+    let output = run_git(root, &args, RunOptions::read_only())?;
+    if !output.success {
+        return Err(format_git_error(err_prefix, &output));
+    }
+    Ok(build_diff(
+        path.to_owned(),
+        &output.stdout,
+        output.stdout_truncated,
+    ))
 }
 
 pub fn run_action(cwd: &Path, action: &GitAction) -> Result<GitActionResult, String> {
@@ -621,7 +645,12 @@ fn status_for_root(root: &Path) -> Result<GitStatus, String> {
     let log_limit = MAX_COMMITS.to_string();
     let log_out = run_git(
         root,
-        &["log", "-n", &log_limit, "--format=%H%x1f%h%x1f%an%x1f%ar%x1f%s"],
+        &[
+            "log",
+            "-n",
+            &log_limit,
+            "--format=%H%x1f%h%x1f%an%x1f%ar%x1f%s",
+        ],
         RunOptions::read_only(),
     )?;
     if log_out.success {
@@ -715,12 +744,7 @@ fn parse_porcelain_v2_z(bytes: &[u8], status: &mut GitStatus) {
     }
 }
 
-fn push_xy_change(
-    status: &mut GitStatus,
-    xy: &str,
-    path: String,
-    orig_path: Option<String>,
-) {
+fn push_xy_change(status: &mut GitStatus, xy: &str, path: String, orig_path: Option<String>) {
     let mut chars = xy.chars();
     let x = chars.next().unwrap_or('.');
     let y = chars.next().unwrap_or('.');
@@ -998,10 +1022,7 @@ fn validate_branch_name(raw: &str) -> Result<String, String> {
 
 fn validate_commit_hash(raw: &str) -> Result<String, String> {
     let hash = raw.trim();
-    if hash.len() < 4
-        || hash.len() > 40
-        || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    if hash.len() < 4 || hash.len() > 40 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("提交哈希无效。".to_owned());
     }
     Ok(hash.to_owned())
@@ -1301,10 +1322,8 @@ mod tests {
 
     impl TempDir {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "naro-git-test-{name}-{}",
-                uuid::Uuid::new_v4()
-            ));
+            let path =
+                std::env::temp_dir().join(format!("naro-git-test-{name}-{}", uuid::Uuid::new_v4()));
             fs::create_dir_all(&path).expect("create temp dir");
             Self(path)
         }
@@ -1370,6 +1389,7 @@ mod tests {
                 scope: GitDiffScope::Untracked,
                 path: Some("hello.txt".into()),
                 commit: None,
+                full_context: false,
             },
         )
         .unwrap();
@@ -1425,6 +1445,7 @@ mod tests {
                 scope: GitDiffScope::Unstaged,
                 path: Some("hello.txt".into()),
                 commit: None,
+                full_context: false,
             },
         )
         .unwrap();
@@ -1474,6 +1495,7 @@ mod tests {
                 scope: GitDiffScope::Commit,
                 path: None,
                 commit: Some(commit_hash),
+                full_context: false,
             },
         )
         .unwrap();

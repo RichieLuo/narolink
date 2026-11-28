@@ -16,7 +16,7 @@ Codex、Claude Code、Antigravity のセッションを、PC・スマートフ�
 
 ## はじめに
 
-接続先の PC に使用する CLI（`codex`、`claude`、`agy`）をインストールし、ログインしておきます。macOS では ZIP を展開して `Naro.app` を開き、Windows では `Naro.exe` を起動します。ソースからのビルド手順は後述します。
+接続先の PC に使用する CLI（`codex`、`claude`、`agy`）をインストールし、ログインしておきます。macOS では ZIP を展開し、`Naro.app` を「アプリケーション」に移動してから開きます。Windows では書き込み可能なフォルダーから `Naro.exe` を起動します。ソースからのビルド手順は後述します。
 
 サイドバーから既存のセッションを選べます。新規セッションでは、エンジンと接続先 PC の作業ディレクトリを選びます。Codex のセッションは登録済みのプロジェクトごとに表示され、過去のセッションも作業ディレクトリから所属先を特定できれば対応するプロジェクトに表示されます。プロジェクトの横にある **＋** からセッションを作成できます。フォルダーが複数ある場合は、その中から作業先を選びます。Claude Code と Antigravity では、以前に使った作業ディレクトリを選べます。
 
@@ -37,18 +37,26 @@ Codex、Claude Code、Antigravity のセッションを、PC・スマートフ�
 Go 1.23 以降でリレーをビルドします。サーバー上で公開 HTTPS アドレスと接続トークンを設定します。以下の例では OpenSSL でランダムなトークンを生成します。例のドメインをお使いのドメインに置き換え、接続先にする各 PC に同じトークンを設定してください。リレーの再起動後も再接続できるよう、サービスの環境設定にトークンを保持します。
 
 ```sh
-go build -trimpath -ldflags="-s -w" -o narolink-relay .
-export NAROLINK_PUBLIC_URL=https://naro.example.com
-export NAROLINK_RELAY_TOKEN="$(openssl rand -hex 32)"
-./narolink-relay
+go build -trimpath -ldflags="-s -w" -o naro-relay .
+export NARO_PUBLIC_URL=https://naro.example.com
+export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
+./naro-relay
+```
+
+リポジトリルートの `Dockerfile` と `compose.yml` を使い、Docker で配備することもできます（既定で `127.0.0.1:7319` にバインドする読み取り専用・非 root の `naro-relay` `scratch` イメージ）：
+
+```sh
+export NARO_PUBLIC_URL=https://naro.example.com
+export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
+docker compose up -d --build
 ```
 
 | 環境変数 | 用途 |
 | --- | --- |
-| `NAROLINK_PUBLIC_URL` | リレーの公開 HTTPS オリジン。スキームとホスト名、および必要に応じてポートを指定 |
-| `NAROLINK_RELAY_TOKEN` | リレーと接続先 PC で共有するランダムなトークン。空白を含まない 32〜512 文字の ASCII 文字列を使用 |
-| `NAROLINK_RELAY_ADDR` | リレーの待ち受けアドレス。既定値は `127.0.0.1:7319` |
-| `NAROLINK_TLS_CERT`、`NAROLINK_TLS_KEY` | 任意。Go リレーで直接 HTTPS を提供する場合は、証明書ファイルと秘密鍵ファイルの両方を指定 |
+| `NARO_PUBLIC_URL` | リレーの公開 HTTPS オリジン。スキームとホスト名、および必要に応じてポートを指定 |
+| `NARO_RELAY_TOKEN` | リレーと接続先 PC で共有するランダムなトークン。空白を含まない 32〜512 文字の ASCII 文字列を使用 |
+| `NARO_RELAY_ADDR` | リレーの待ち受けアドレス。既定値は `127.0.0.1:7319` |
+| `NARO_TLS_CERT`、`NARO_TLS_KEY` | 任意。Go リレーで直接 HTTPS を提供する場合は、証明書ファイルと秘密鍵ファイルの両方を指定 |
 
 HTTPS リバースプロキシを使う場合は、元の `Host` ヘッダーを保持し、HTTP/1.1 と WebSocket アップグレード（`Upgrade` / `Connection`）を有効にし、リクエストボディーの上限を 36 MiB 以上に設定して WSS と SSE のバッファリングを無効にします。Nginx + 単一 Go リレーの構成例は以下の通りです。
 
@@ -119,7 +127,11 @@ Codex は `app-server` 経由で既存のセッションを読み込みます。
 
 デスクトップ版の **設定 → ネットワーク → CLI プロキシ**で HTTP または HTTPS プロキシを設定できます。保存後に Naro が起動する CLI に適用され、別の端末から開始した実行にも反映されます。アドレスを空にして保存すると、CLI は Naro の起動環境を継承します。
 
-CLI が見つからない場合は、Naro の起動環境で `NAROLINK_CODEX_CLI`、`NAROLINK_CLAUDE_CLI`、`NAROLINK_AGY_CLI` のいずれかに実行ファイルの絶対パスを指定できます。
+接続先 PC のデスクトップ版で **設定 → CLI パス** を開き、Codex、Claude Code、Antigravity の実行ファイルを個別に指定できます。絶対パスを入力するか、ファイルを選択してください。保存後に起動する CLI には指定したパスが優先されます。欄を空にして保存すると、起動時の環境変数（`NAROLINK_CODEX_CLI`、`NAROLINK_CLAUDE_CLI`、`NAROLINK_AGY_CLI`）や自動検出が使われます。
+
+## デスクトップ版のアップデート
+
+Naro は起動後にアップデートを確認します。**設定 → ソフトウェアアップデート**から手動でも確認できます。新しいバージョンをダウンロードし、タスクの完了後に再起動してインストールできます。`0.1.x` を使用している場合は、新しい起点となる `0.0.0` を一度手動でインストールしてください。[リリース手順](README.md#发布桌面更新)を参照してください。
 
 ## ソースからのビルドとテスト
 

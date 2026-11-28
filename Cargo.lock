@@ -788,8 +788,6 @@ dependencies = [
 [[package]]
 name = "egui_commonmark_backend"
 version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3cff846279556f57af8ea606f2e4ceaf83e60b81db014c126dfb926fa06c75b"
 dependencies = [
  "egui",
  "egui_extras",
@@ -937,6 +935,12 @@ dependencies = [
  "regex-automata",
  "regex-syntax",
 ]
+
+[[package]]
+name = "fastrand"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fax"
@@ -1857,7 +1861,7 @@ dependencies = [
 
 [[package]]
 name = "narolink"
-version = "0.1.21"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1873,6 +1877,7 @@ dependencies = [
  "hmac",
  "image",
  "keyring",
+ "libc",
  "memchr",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -1882,10 +1887,13 @@ dependencies = [
  "qrcode",
  "reqwest",
  "rfd",
+ "ring",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "url",
  "uuid",
@@ -3199,6 +3207,19 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows",
+]
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix 1.1.5",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -16,7 +16,7 @@
 
 ## 开始使用
 
-在目标电脑安装并登录要使用的 CLI（`codex`、`claude` 或 `agy`）。macOS 解压安装包后打开 `Naro.app`，Windows 运行 `Naro.exe`。也可以按下文从源码构建。
+在目标电脑安装并登录要使用的 CLI（`codex`、`claude` 或 `agy`）。macOS 解压后将 `Naro.app` 拖入「应用程序」再打开。Windows 将 `Naro.exe` 放在可写目录中运行。也可以按下文从源码构建。
 
 从侧栏选择已有会话，或选择引擎和目标电脑上的工作目录开始新会话。Codex 会话按登记的项目显示，能从工作目录确定归属的旧会话也会归入对应项目。点击项目旁的 **＋** 可在该项目中新建会话。项目包含多个文件夹时，可以选用其中一个。Claude Code 和 Antigravity 可以选择用过的工作目录。
 
@@ -34,23 +34,33 @@
 
 同一台电脑可通过 **设备连接 → 打开本机网页** 使用浏览器工作台，默认地址是 `http://127.0.0.1:4318`。
 
+Naro 桌面端会在启动后检查更新，也可以打开 **设置 → 软件更新** 手动检查。发现新版本后，可下载并在任务结束后确认重启安装。之前使用 `0.1.x` 的用户需要先手动安装新的 `0.0.0` 起始版一次。
+
 ## 部署 Go 中继
 
 使用 Go 1.23 或更新版本构建中继。在服务器上为中继进程设置公开 HTTPS 地址和连接密钥。下面的示例用 OpenSSL 生成随机密钥。把域名替换为自己的域名，将同一个密钥填入需要连接的目标电脑。长期运行时，在服务的环境配置中保留该密钥，以便中继重启后仍可连接。
 
 ```sh
-go build -trimpath -ldflags="-s -w" -o narolink-relay .
-export NAROLINK_PUBLIC_URL=https://naro.example.com
-export NAROLINK_RELAY_TOKEN="$(openssl rand -hex 32)"
-./narolink-relay
+go build -trimpath -ldflags="-s -w" -o naro-relay .
+export NARO_PUBLIC_URL=https://naro.example.com
+export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
+./naro-relay
+```
+
+也可以使用仓库根目录的 `Dockerfile` 和 `compose.yml` 通过 Docker 部署（基于 `scratch` 的只读非 root `naro-relay` 镜像，默认绑定 `127.0.0.1:7319`）：
+
+```sh
+export NARO_PUBLIC_URL=https://naro.example.com
+export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
+docker compose up -d --build
 ```
 
 | 环境变量 | 用途 |
 | --- | --- |
-| `NAROLINK_PUBLIC_URL` | 中继的公开 HTTPS 地址，仅包含协议、主机名和可选端口 |
-| `NAROLINK_RELAY_TOKEN` | 中继与目标电脑共享的随机密钥，使用 32 至 512 个无空格的 ASCII 字符 |
-| `NAROLINK_RELAY_ADDR` | 中继监听地址，默认 `127.0.0.1:7319` |
-| `NAROLINK_TLS_CERT`、`NAROLINK_TLS_KEY` | 可选。由 Go 中继直接提供 HTTPS 时，同时指定证书和私钥文件 |
+| `NARO_PUBLIC_URL` | 中继的公开 HTTPS 地址，仅包含协议、主机名和可选端口 |
+| `NARO_RELAY_TOKEN` | 中继与目标电脑共享的随机密钥，使用 32 至 512 个无空格的 ASCII 字符 |
+| `NARO_RELAY_ADDR` | 中继监听地址，默认 `127.0.0.1:7319` |
+| `NARO_TLS_CERT`、`NARO_TLS_KEY` | 可选。由 Go 中继直接提供 HTTPS 时，同时指定证书和私钥文件 |
 
 使用 HTTPS 反向代理时，保留原始 `Host`，启用 HTTP/1.1 与 WebSocket 升级（`Upgrade` / `Connection`），允许至少 36 MiB 的请求体，并对 WSS 与 SSE 关闭响应缓冲。以 Nginx + 单 Go 中继为例：
 
@@ -121,7 +131,7 @@ Codex 使用 `app-server` 读取原会话。Claude Code 从本机 JSONL 读取�
 
 在桌面端 **设置 → 网络 → CLI 网络代理** 中，可以为 Naro 新启动的 CLI 设置 HTTP 或 HTTPS 代理，也适用于从其他设备发起的任务。清空地址并保存后，CLI 会继承 Naro 的启动环境。
 
-如果 Naro 找不到 CLI，启动时可用 `NAROLINK_CODEX_CLI`、`NAROLINK_CLAUDE_CLI` 或 `NAROLINK_AGY_CLI` 指定可执行文件的绝对路径。
+在目标电脑的 Naro 桌面端打开 **设置 → CLI 路径**，可分别为 Codex、Claude Code 和 Antigravity 粘贴可执行文件的绝对路径或用「选择文件」定位。保存后，新启动的 CLI 会优先使用设置的路径。清空某一项并保存后，Naro 会依次读取该引擎的启动环境变量（`NAROLINK_CODEX_CLI`、`NAROLINK_CLAUDE_CLI` 或 `NAROLINK_AGY_CLI`）和自动查找位置。
 
 ## 从源码构建与测试
 
@@ -148,6 +158,17 @@ node scripts/e2e.mjs dist/Naro.exe dist/narolink-relay.exe
 ```
 
 Rust 和 Go 测试分别用 `cargo test --locked` 和 `go test ./...` 运行。端到端测试用模拟 CLI 启动一个 Go 中继和两个独立的 Rust 实例，覆盖设备配对、请求隔离、原 ID 续聊、图片传输、模型切换、停止和操作确认。
+
+### 发布桌面更新
+
+1. 用同一产品版本构建各平台的最终安装包。公开发行的 macOS 包可使用 `NAROLINK_MACOS_SIGN_IDENTITY` 指定 Developer ID Application，并用 `NAROLINK_MACOS_NOTARY_PROFILE` 指定 `notarytool` 的钥匙串配置，打包脚本会完成公证并附上票据。
+2. 用发布者保存在本机的 Ed25519 私钥为最终安装包生成更新清单。公钥在 `assets/update-key.txt`，私钥保存在仓库和中继之外。
+
+   ```sh
+   node scripts/sign-update.mjs 0.0.0 "$NAROLINK_UPDATE_KEY_FILE" dist/Naro-0.0.0-macOS-arm64.zip dist/Naro.exe
+   ```
+
+3. 将 `dist/naro-update-v1.json` 和参与签名的安装包上传到对应的 GitHub Release 草稿（例如 `v0.0.0`），保留文件名，再作为最新的正式版本发布。客户端通过 HTTPS 检查签名清单，并按平台下载和校验安装包。
 
 ## 网页 API
 

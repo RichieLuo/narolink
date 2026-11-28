@@ -133,7 +133,9 @@ fn clean_commit_message(raw: Option<&str>) -> Option<String> {
     let text = text.trim();
     if text.is_empty()
         || text.chars().count() > MAX_COMMIT_CHARS
-        || text.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
+        || text
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
     {
         return None;
     }

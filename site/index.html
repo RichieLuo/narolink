@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Naro — 跨设备无痕接力你的本地 AI 编程会话</title>
+  <meta name="description" content="在电脑、手机和平板之间接续 Codex、Claude Code 和 Antigravity 会话。Rust 原生桌面端与零落盘 Go 中继，MIT 开源。">
+  <link rel="icon" type="image/png" href="assets/icon-192.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      var qTheme = params.get("theme");
+      var saved = (qTheme === "dark" || qTheme === "light" || qTheme === "system")
+        ? qTheme
+        : (localStorage.getItem("naro-site-theme") || "system");
+      var dark = saved === "dark" || (saved === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+      document.documentElement.dataset.themePref = saved;
+    })();
+  </script>
+</head>
+<body>
+  <div class="studio-backdrop" aria-hidden="true"></div>
+
+  <!-- Navigation -->
+  <header class="site-header">
+    <div class="container nav-inner">
+      <a href="#top" class="brand-link" aria-label="Naro Home">
+        <span class="brand-mark">
+          <img src="assets/icon-192.png" alt="Naro logo" width="24" height="24">
+        </span>
+        <span>Naro</span>
+        <span class="version-pill">v0.0.0</span>
+      </a>
+
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="#workspace" data-i18n="navWorkspace">工作台</a>
+        <a href="#relay" data-i18n="navRelay">中继架构</a>
+        <a href="#features" data-i18n="navFeatures">核心能力</a>
+        <a href="#deploy" data-i18n="navDeploy">自托管部署</a>
+      </nav>
+
+      <div class="nav-actions">
+        <div class="lang-switcher" role="group" aria-label="Language switcher">
+          <button type="button" class="lang-btn" data-lang="zh-CN" aria-pressed="true">简</button>
+          <button type="button" class="lang-btn" data-lang="en" aria-pressed="false">EN</button>
+          <button type="button" class="lang-btn" data-lang="ja" aria-pressed="false">日</button>
+        </div>
+
+        <button type="button" class="icon-btn" id="theme-toggle" aria-label="Toggle theme" title="浅色 / 深色 / 跟随系统">
+          <svg id="theme-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"></svg>
+        </button>
+
+        <a class="nav-cta" href="https://github.com/RichieLuo/narolink/releases" target="_blank" rel="noreferrer">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="7 10 12 15 17 10"></polyline>
+            <line x1="12" y1="15" x2="12" y2="3"></line>
+          </svg>
+          <span class="nav-cta-text" data-i18n="navDownload">下载 Naro</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main id="top">
+    <!-- Hero + Interactive Handoff Studio -->
+    <section class="hero" id="workspace">
+      <div class="container">
+        <div class="hero-head">
+          <div class="eyebrow">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            <span data-i18n="eyebrow">支持 Codex · Claude Code · Antigravity</span>
+          </div>
+
+          <h1 class="hero-title">
+            <span data-i18n="heroLine1">会话留在你的电脑，</span><br>
+            <span data-i18n="heroLine2Prefix">随时随地</span><span class="accent-word" data-i18n="heroLine2Accent">无痕接力</span>
+          </h1>
+
+          <p class="hero-subtitle" data-i18n="heroSubtitle">
+            在目标电脑运行原生 CLI，在另一台电脑的 Naro 桌面端，或手机与平板的浏览器中无缝续聊、审批、看 Diff 与推送代码。Go 中继仅内存转发，零数据落盘。
+          </p>
+
+          <div class="hero-cta-row">
+            <a class="btn btn-primary" href="https://github.com/RichieLuo/narolink/releases" target="_blank" rel="noreferrer">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span data-i18n="ctaDownload">下载桌面端 (macOS / Windows)</span>
+            </a>
+            <a class="btn btn-secondary" href="#deploy">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="4 17 10 11 4 5"></polyline>
+                <line x1="12" y1="19" x2="20" y2="19"></line>
+              </svg>
+              <span data-i18n="ctaDeploy">部署 Go 中继</span>
+            </a>
+          </div>
+
+          <div class="hero-meta">
+            <span data-i18n="metaRust">Rust 原生桌面端</span>
+            <span data-i18n="metaGo">Go 零落盘单 WSS 中继</span>
+            <span data-i18n="metaMit">MIT 开源 · 无需开放端口</span>
+          </div>
+        </div>
+
+        <!-- Live Interactive Handoff Studio -->
+        <div class="handoff-stage">
+          <div class="stage-toolbar">
+            <div class="engine-pills" role="group" aria-label="Switch coding agent engine">
+              <button type="button" class="engine-pill" data-engine="codex" aria-pressed="true">
+                <span class="engine-dot codex"></span>
+                <span>Codex</span>
+              </button>
+              <button type="button" class="engine-pill" data-engine="claude" aria-pressed="false">
+                <span class="engine-dot claude"></span>
+                <span>Claude Code</span>
+              </button>
+              <button type="button" class="engine-pill" data-engine="antigravity" aria-pressed="false">
+                <span class="engine-dot antigravity"></span>
+                <span>Antigravity</span>
+              </button>
+            </div>
+
+            <div class="stage-status">
+              <span class="wss-pill">
+                <span class="pulse-dot" aria-hidden="true"></span>
+                <span data-i18n="stageWss">1 条 WSS 长连接 · 零落盘</span>
+              </span>
+            </div>
+          </div>
+
+          <div class="handoff-grid">
+            <!-- Desktop Naro App Mockup -->
+            <div class="desktop-frame">
+              <div class="window-chrome">
+                <div class="traffic-lights" aria-hidden="true">
+                  <span></span><span></span><span></span>
+                </div>
+
+                <div class="window-tabs" role="tablist" aria-label="Workspace view">
+                  <button type="button" class="window-tab" role="tab" data-view="chat" aria-selected="true" data-i18n="tabChat">会话流</button>
+                  <button type="button" class="window-tab" role="tab" data-view="git" aria-selected="false" data-i18n="tabGit">Git 管理</button>
+                  <button type="button" class="window-tab" role="tab" data-view="usage" aria-selected="false" data-i18n="tabUsage">用量统计</button>
+                </div>
+
+                <span class="host-tag">
+                  <span class="pulse-dot" style="width:6px;height:6px;"></span>
+                  Mac Studio · Naro.app
+                </span>
+              </div>
+
+              <div class="desktop-body">
+                <aside class="mock-sidebar">
+                  <div class="sidebar-label" data-i18n="sidebarProjects">工作区项目</div>
+                  <div class="session-item is-active">
+                    <span>naro-link</span>
+                    <small>main · active</small>
+                  </div>
+                  <div class="session-item">
+                    <span>relay-bench</span>
+                    <small>go 1.23</small>
+                  </div>
+                  <div class="session-item">
+                    <span>desktop-ui</span>
+                    <small>egui 0.33</small>
+                  </div>
+
+                  <div class="sidebar-footer">
+                    <div class="mini-meter">
+                      <span data-i18n="sidebarQuotaLabel">24h Token 用量</span>
+                      <strong>1.84M tokens</strong>
+                      <span style="font-size:0.65rem;" data-i18n="sidebarQuotaSub">含缓存读取与写入</span>
+                    </div>
+                  </div>
+                </aside>
+
+                <div class="mock-main">
+                  <div class="mock-topbar">
+                    <div class="mock-title-wrap">
+                      <div class="mock-session-title" id="mock-session-title">优化 Go 中继 WSS 心跳与重连退避</div>
+                      <div class="mock-cwd" id="mock-cwd">~/WorkSpace/naro-link</div>
+                    </div>
+                    <div class="mock-badges">
+                      <span class="chip" id="mock-model-chip">gpt-5.4 · High</span>
+                      <span class="chip bolt" id="mock-fast-chip" title="Fast mode" aria-label="Fast mode">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                        </svg>
+                      </span>
+                      <span class="chip" id="mock-perm-chip">请求批准</span>
+                    </div>
+                  </div>
+
+                  <!-- View 1: Chat -->
+                  <div class="mock-view" data-view-panel="chat">
+                    <div class="msg-bubble msg-user" id="mock-user-msg">
+                      帮我检查 relay_ws.go 里的断线重连逻辑，确保不会重复执行写请求。
+                    </div>
+                    <div class="msg-bubble msg-assistant" id="mock-assistant-msg">
+                      已定位 <span class="file-chip">relay_ws.go</span> 中的重连循环。建议在退避窗口引入随机抖动，并在连接断开时立即清理挂起的 <code>pendingRequests</code>，不自动重放非幂等请求。
+                    </div>
+                    <div class="msg-steer-banner" id="mock-handoff-banner" hidden>
+                      <span id="mock-handoff-text"></span>
+                      <span class="mono" style="font-size:0.7rem;">WSS · sync</span>
+                    </div>
+                    <div class="mock-composer">
+                      <span data-i18n="composerPlaceholder">Enter 发送 · Shift+Enter 换行 · ⌘V 粘贴截图</span>
+                      <span class="composer-meta">
+                        <span class="chip" data-i18n="composerMode">队列 / 引导</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  <!-- View 2: Git Diff -->
+                  <div class="mock-view" data-view-panel="git" hidden>
+                    <div class="git-actions-bar">
+                      <span class="git-pill">branch: feat/wss-backoff</span>
+                      <span class="git-pill" data-i18n="gitActionStage">暂存更改</span>
+                      <span class="git-pill" data-i18n="gitActionCommit">提交 (含 Amend)</span>
+                      <span class="git-pill primary-git" data-i18n="gitActionPush">Push 远端</span>
+                    </div>
+                    <div class="diff-box">
+                      <div class="diff-header">
+                        <span>relay_ws.go</span>
+                        <span><span class="stat-pos">+6</span> <span class="stat-neg">-2</span></span>
+                      </div>
+                      <div class="diff-line"> func (h *hostConn) handleDisconnect() {</div>
+                      <div class="diff-line del">-    h.retryPendingRequests()</div>
+                      <div class="diff-line add">+    // Never replay side-effecting requests on reconnect</div>
+                      <div class="diff-line add">+    h.failAndClearPending(ErrHostDisconnected)</div>
+                      <div class="diff-line add">+    h.scheduleReconnectWithJitter(25 * time.Second)</div>
+                      <div class="diff-line"> }</div>
+                    </div>
+                  </div>
+
+                  <!-- View 3: Usage -->
+                  <div class="mock-view" data-view-panel="usage" hidden>
+                    <div class="usage-cards">
+                      <div class="usage-card">
+                        <span data-i18n="usage24h">最近 24 小时</span>
+                        <strong>1.84M</strong>
+                      </div>
+                      <div class="usage-card">
+                        <span data-i18n="usage7d">最近 7 天</span>
+                        <strong>11.2M</strong>
+                      </div>
+                      <div class="usage-card">
+                        <span data-i18n="usage30d">最近 30 天</span>
+                        <strong>42.6M</strong>
+                      </div>
+                    </div>
+                    <div class="usage-bars">
+                      <div class="bar-row">
+                        <div class="bar-head"><span>Codex</span><span>52% · 22.1M</span></div>
+                        <div class="bar-track"><div class="bar-fill" style="width:52%;background:#3570b5;"></div></div>
+                      </div>
+                      <div class="bar-row">
+                        <div class="bar-head"><span>Claude Code</span><span>31% · 13.2M</span></div>
+                        <div class="bar-track"><div class="bar-fill" style="width:31%;background:#d97757;"></div></div>
+                      </div>
+                      <div class="bar-row">
+                        <div class="bar-head"><span>Antigravity</span><span>17% · 7.3M</span></div>
+                        <div class="bar-track"><div class="bar-fill" style="width:17%;background:#2c866a;"></div></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Animated WSS Signal Bridge -->
+            <div class="wire-bridge" id="wire-bridge" aria-hidden="true">
+              <svg class="wire-svg" viewBox="0 0 88 180" preserveAspectRatio="none">
+                <path class="wire-path" d="M 0 90 C 28 90, 60 90, 88 90"></path>
+                <path class="wire-pulse" d="M 0 90 C 28 90, 60 90, 88 90"></path>
+              </svg>
+              <span class="wire-node-badge">RAM · WSS</span>
+            </div>
+
+            <!-- Mobile Web Handoff Mockup -->
+            <div class="phone-frame">
+              <div class="phone-screen">
+                <div class="phone-notch-bar">
+                  <span>09:41</span>
+                  <span class="phone-pill-island" aria-hidden="true"></span>
+                  <span>5G</span>
+                </div>
+
+                <div class="phone-header">
+                  <div class="phone-device-name">
+                    <span class="pulse-dot" style="width:7px;height:7px;"></span>
+                    <span data-i18n="phoneConnected">已连 Mac Studio</span>
+                  </div>
+                  <span class="mono" style="font-size:0.66rem;color:var(--app-muted);">PWA</span>
+                </div>
+
+                <div class="phone-content">
+                  <div class="phone-card" id="phone-summary">
+                    Codex 已提出补丁，准备运行 Go 竞态检测验证重连状态机。
+                  </div>
+
+                  <div class="phone-approval">
+                    <div class="phone-approval-title">
+                      <span data-i18n="phoneApprovalTitle">待审批命令</span>
+                      <span class="mono" style="font-size:0.65rem;">req #a41f</span>
+                    </div>
+                    <div class="phone-cmd" id="phone-cmd">go test ./... -race -count=1</div>
+                    <div class="phone-btn-row">
+                      <button type="button" class="phone-action-btn approve" id="btn-phone-approve" data-i18n="phoneApproveBtn">批准执行</button>
+                      <button type="button" class="phone-action-btn steer" id="btn-phone-steer" data-i18n="phoneSteerBtn">引导当前轮</button>
+                    </div>
+                  </div>
+
+                  <div class="phone-toast" id="phone-toast">
+                    <span class="pulse-dot" style="width:6px;height:6px;"></span>
+                    <span id="phone-toast-text" data-i18n="phoneToastIdle">WSS 隧道在线 · 延迟 18ms</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Three Native Engines -->
+    <section class="section">
+      <div class="container">
+        <div class="section-header reveal">
+          <div class="section-kicker" data-i18n="enginesKicker">NATIVE CLI ENGINES</div>
+          <h2 class="section-title" data-i18n="enginesTitle">三大编码引擎，原生协议直连</h2>
+          <p class="section-desc" data-i18n="enginesDesc">
+            Naro 不发明封闭格式，也不接管你的对话数据。所有会话历史直接读写目标电脑上原生 CLI 的状态，随时可回到终端继续。
+          </p>
+        </div>
+
+        <div class="engines-grid reveal">
+          <article class="engine-card">
+            <div class="engine-card-top">
+              <h3>Codex</h3>
+              <span class="cli-badge">codex</span>
+            </div>
+            <p data-i18n="codexDesc">
+              通过 app-server 读取并接续原会话，按登记项目自动归组；支持推理强度、闪电快速模式、四档权限预设以及账号额度一键重置。
+            </p>
+            <div class="engine-tags" data-tags="codexTags">
+              <span class="engine-tag">app-server</span>
+              <span class="engine-tag">项目归组</span>
+              <span class="engine-tag">快速模式</span>
+              <span class="engine-tag">额度重置</span>
+            </div>
+          </article>
+
+          <article class="engine-card">
+            <div class="engine-card-top">
+              <h3>Claude Code</h3>
+              <span class="cli-badge">claude</span>
+            </div>
+            <p data-i18n="claudeDesc">
+              直读本机 JSONL 会话历史并以 --resume 原 ID 续聊；完整映射 CLI 权限模式与套餐额度查询，保持与本机终端一致的上下文。
+            </p>
+            <div class="engine-tags" data-tags="claudeTags">
+              <span class="engine-tag">本机 JSONL</span>
+              <span class="engine-tag">--resume 续聊</span>
+              <span class="engine-tag">原生权限模式</span>
+              <span class="engine-tag">套餐额度</span>
+            </div>
+          </article>
+
+          <article class="engine-card">
+            <div class="engine-card-top">
+              <h3>Antigravity</h3>
+              <span class="cli-badge">agy</span>
+            </div>
+            <p data-i18n="agyDesc">
+              通过 ACP 协议读取并接续 Antigravity 会话，兼容 Antigravity 桌面端数据目录与 SQLite 历史统计，支持切换 CLI 执行模式。
+            </p>
+            <div class="engine-tags" data-tags="agyTags">
+              <span class="engine-tag">ACP 协议</span>
+              <span class="engine-tag">SQLite 历史</span>
+              <span class="engine-tag">CLI 执行模式</span>
+              <span class="engine-tag">桌面端目录</span>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- Zero-Persistence Relay Architecture -->
+    <section class="section" id="relay">
+      <div class="container">
+        <div class="section-header reveal">
+          <div class="section-kicker" data-i18n="relayKicker">ZERO-PERSISTENCE ARCHITECTURE</div>
+          <h2 class="section-title" data-i18n="relayTitle">不落盘的 Go 中继，一条 WSS 并发复用</h2>
+          <p class="section-desc" data-i18n="relayDesc">
+            目标电脑只需主动发起 1 条出站 WSS 长连接，无需公网 IP 或防火墙端口映射。聊天记录、附件、文件预览与配对记录从不写入中继磁盘。
+          </p>
+        </div>
+
+        <div class="relay-panel reveal">
+          <div class="relay-diagram">
+            <div class="relay-node" id="node-client">
+              <span class="node-tag" data-i18n="nodeClientTag">ACCESS CLIENT</span>
+              <h3 data-i18n="nodeClientTitle">访问设备</h3>
+              <p data-i18n="nodeClientDesc">手机 / 平板浏览器（PWA）或另一台电脑的 Naro 桌面端，使用标准 HTTPS API 与 SSE。</p>
+            </div>
+
+            <div class="relay-pipe">
+              <span class="pipe-label" data-i18n="pipeHttps">HTTPS / SSE</span>
+              <div class="pipe-line">
+                <span class="packet-dot fwd" id="pkt-left-fwd"></span>
+                <span class="packet-dot back" id="pkt-left-back"></span>
+              </div>
+              <span class="pipe-sub" data-i18n="pipeHttpsSub">同源校验</span>
+            </div>
+
+            <div class="relay-node center-node" id="node-relay">
+              <span class="node-tag" data-i18n="nodeRelayTag">IN-MEMORY ONLY</span>
+              <h3 data-i18n="nodeRelayTitle">Naro Go 中继</h3>
+              <p data-i18n="nodeRelayDesc">仅在内存维护设备路由与在线状态，按请求 ID 复用单条 WSS，结束或断线即清理。</p>
+            </div>
+
+            <div class="relay-pipe">
+              <span class="pipe-label" data-i18n="pipeWss">单条 WSS</span>
+              <div class="pipe-line">
+                <span class="packet-dot wss" id="pkt-right-fwd"></span>
+                <span class="packet-dot back" id="pkt-right-back"></span>
+              </div>
+              <span class="pipe-sub" data-i18n="pipeWssSub">主动出站</span>
+            </div>
+
+            <div class="relay-node" id="node-host">
+              <span class="node-tag" data-i18n="nodeHostTag">TARGET HOST</span>
+              <h3 data-i18n="nodeHostTitle">目标电脑</h3>
+              <p data-i18n="nodeHostDesc">运行 Naro 桌面端与本机 CLI，验证配对码、读取项目文件并管理完整会话历史。</p>
+            </div>
+          </div>
+
+          <div class="relay-controls">
+            <div class="sim-buttons" role="group" aria-label="Simulate relay traffic">
+              <button type="button" class="sim-btn is-active" data-sim="stream" data-i18n="simStream">发送追问 (SSE 流式)</button>
+              <button type="button" class="sim-btn" data-sim="approval" data-i18n="simApproval">流式中并发审批</button>
+              <button type="button" class="sim-btn" data-sim="stop" data-i18n="simStop">即时停止生成</button>
+              <button type="button" class="sim-btn" data-sim="heartbeat" data-i18n="simHeartbeat">空闲 25s 心跳</button>
+            </div>
+
+            <div class="telemetry-strip">
+              <span class="telemetry-item safe"><span data-i18n="telDisk">中继落盘</span>: <strong>0 B</strong></span>
+              <span class="telemetry-item safe"><span data-i18n="telPorts">需开放入站端口</span>: <strong>0</strong></span>
+              <span class="telemetry-item"><span data-i18n="telWss">目标机连接数</span>: <strong>1 WSS</strong></span>
+            </div>
+          </div>
+
+          <div class="relay-log" id="relay-log" aria-live="polite">
+            <span id="relay-log-text" data-i18n="simLogDefault">点击上方场景，观察请求如何经单条 WSS 在内存中零落盘转发。</span>
+            <span style="color:var(--green);font-weight:700;flex:none;">RAM ONLY</span>
+          </div>
+
+          <div class="honest-note">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-top:2px;" aria-hidden="true">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="16" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12.01" y2="8"></line>
+            </svg>
+            <div>
+              <strong data-i18n="honestTitle">公开透明：</strong>
+              <span data-i18n="honestText">Naro Go 中继本身不持久化任何用户数据；官方部署的 Nginx 反向代理会记录包含来源 IP 与请求路径的标准访问日志。你随时可以用一条命令部署自己的私有中继。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Core Capabilities Bento Grid -->
+    <section class="section" id="features">
+      <div class="container">
+        <div class="section-header reveal">
+          <div class="section-kicker" data-i18n="featuresKicker">BUILT FOR REAL WORKFLOWS</div>
+          <h2 class="section-title" data-i18n="featuresTitle">不只是手机壳，是完整的远程编码工作台</h2>
+          <p class="section-desc" data-i18n="featuresDesc">把在电脑前顺手的每一个细节，都带到沙发、通勤路上与另一台设备。</p>
+        </div>
+
+        <div class="bento-grid reveal">
+          <!-- Card 1: Queue & Steer -->
+          <article class="bento-card span-7">
+            <div class="bento-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="8" y1="6" x2="21" y2="6"></line>
+                <line x1="8" y1="12" x2="21" y2="12"></line>
+                <line x1="8" y1="18" x2="21" y2="18"></line>
+                <line x1="3" y1="6" x2="3.01" y2="6"></line>
+                <line x1="3" y1="12" x2="3.01" y2="12"></line>
+                <line x1="3" y1="18" x2="3.01" y2="18"></line>
+              </svg>
+            </div>
+            <h3 data-i18n="featQueueTitle">队列、引导与撤回修改</h3>
+            <p data-i18n="featQueueDesc">
+              回复期间随时发送后续消息：默认「加入队列」按序执行，或用「引导会话 (Steer)」直接注入当前轮；支持撤回排队消息编辑并通过「切换草稿」找回原内容。
+            </p>
+            <div class="bento-visual">
+              <div class="queue-stack">
+                <div class="queue-row">
+                  <span data-i18n="featQueueRow1">补全 WebSocket 断线重试测试</span>
+                  <small data-i18n="featQueueBadge1">引导当前轮</small>
+                </div>
+                <div class="queue-row">
+                  <span data-i18n="featQueueRow2">顺便更新 README.en.md 中的 Nginx 配置</span>
+                  <small data-i18n="featQueueBadge2">撤回修改</small>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Card 2: Git Management -->
+          <article class="bento-card span-5">
+            <div class="bento-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="18" cy="18" r="3"></circle>
+                <circle cx="6" cy="6" r="3"></circle>
+                <path d="M13 6h3a2 2 0 0 1 2 2v7"></path>
+                <line x1="6" y1="9" x2="6" y2="21"></line>
+              </svg>
+            </div>
+            <h3 data-i18n="featGitTitle">内置远程 Git 管理</h3>
+            <p data-i18n="featGitDesc">
+              桌面端与网页端均内置 Git 面板，实时跟随当前工作目录：查看状态与文件 Diff、暂存/取消暂存、丢弃更改、提交（含 Amend）、切换分支及 Fetch / Pull / Push。
+            </p>
+            <div class="bento-visual">
+              <div class="mini-diff-row">
+                <span>src/desktop/git.rs</span>
+                <span><span class="stat-pos">+42</span> <span class="stat-neg">-8</span></span>
+              </div>
+              <div class="mini-diff-row">
+                <span>relay_ws.go</span>
+                <span><span class="stat-pos">+19</span> <span class="stat-neg">-3</span></span>
+              </div>
+              <div class="mini-diff-row">
+                <span>public/app.js</span>
+                <span><span class="stat-pos">+27</span> <span class="stat-neg">-5</span></span>
+              </div>
+            </div>
+          </article>
+
+          <!-- Card 3: Token Usage & Quotas -->
+          <article class="bento-card span-4">
+            <div class="bento-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="20" x2="18" y2="10"></line>
+                <line x1="12" y1="20" x2="12" y2="4"></line>
+                <line x1="6" y1="20" x2="6" y2="14"></line>
+              </svg>
+            </div>
+            <h3 data-i18n="featUsageTitle">Token 用量与账号额度</h3>
+            <p data-i18n="featUsageDesc">
+              汇总目标电脑最近 24 小时、7 天与 30 天的总消耗及分引擎明细（含缓存读写），随时查看各引擎剩余额度与重置时间，Codex 账号可确认使用重置次数。
+            </p>
+            <div class="bento-visual mono">
+              <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+                <span>24h / 7d / 30d</span>
+                <span style="color:var(--green);font-weight:700;">84% left</span>
+              </div>
+              <div class="bar-track"><div class="bar-fill" style="width:84%;background:var(--brand);"></div></div>
+            </div>
+          </article>
+
+          <!-- Card 4: File Preview & Images -->
+          <article class="bento-card span-4">
+            <div class="bento-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+                <line x1="16" y1="13" x2="8" y2="13"></line>
+                <line x1="16" y1="17" x2="8" y2="17"></line>
+              </svg>
+            </div>
+            <h3 data-i18n="featPreviewTitle">只读文件预览与图片粘贴</h3>
+            <p data-i18n="featPreviewDesc">
+              点击回复中的文件链接即可在侧栏或全屏预览（Markdown 渲染/原文切换，上限 2 MiB）；支持 ⌘V / Ctrl+V 粘贴最多 4 张、合计 12 MiB 的截图与图片。
+            </p>
+            <div class="bento-visual mono" style="display:flex;justify-content:space-between;align-items:center;">
+              <span>Markdown · UTF-8</span>
+              <span style="color:var(--brand-deep);font-weight:700;">4 imgs · 12 MiB</span>
+            </div>
+          </article>
+
+          <!-- Card 5: QR Pairing -->
+          <article class="bento-card span-4">
+            <div class="bento-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7"></rect>
+                <rect x="14" y="3" width="7" height="7"></rect>
+                <rect x="14" y="14" width="7" height="7"></rect>
+                <rect x="3" y="14" width="7" height="7"></rect>
+              </svg>
+            </div>
+            <h3 data-i18n="featPairTitle">扫码配对与多设备切换</h3>
+            <p data-i18n="featPairDesc">
+              目标电脑生成一次性二维码与 8 位配对码，手机扫码即连并支持 Safari 添加到主屏幕；同一中继可接入多台电脑，在桌面端或网页侧栏一键切换。
+            </p>
+            <div class="bento-visual">
+              <div class="qr-preview">
+                <div class="qr-box" aria-hidden="true">
+                  <svg viewBox="0 0 36 36" width="54" height="54" fill="#11161d">
+                    <rect x="2" y="2" width="10" height="10" rx="2" fill="none" stroke="#11161d" stroke-width="2.6"/>
+                    <rect x="5.5" y="5.5" width="3" height="3" fill="#3570b5"/>
+                    <rect x="24" y="2" width="10" height="10" rx="2" fill="none" stroke="#11161d" stroke-width="2.6"/>
+                    <rect x="27.5" y="5.5" width="3" height="3"/>
+                    <rect x="2" y="24" width="10" height="10" rx="2" fill="none" stroke="#11161d" stroke-width="2.6"/>
+                    <rect x="5.5" y="27.5" width="3" height="3"/>
+                    <rect x="16" y="4" width="4" height="4" rx="1"/>
+                    <rect x="16" y="12" width="4" height="8" rx="1" fill="#3570b5"/>
+                    <rect x="24" y="16" width="4" height="4" rx="1"/>
+                    <rect x="30" y="16" width="4" height="10" rx="1"/>
+                    <rect x="16" y="24" width="10" height="4" rx="1"/>
+                    <rect x="22" y="30" width="12" height="4" rx="1"/>
+                  </svg>
+                </div>
+                <div>
+                  <div style="font-size:0.72rem;color:var(--muted);" data-i18n="pairCodeLabel">8 位本机配对码</div>
+                  <div class="pair-code">N4R0-82K9</div>
+                  <div style="font-size:0.7rem;color:var(--muted-soft);" data-i18n="pairCodeSub">由目标电脑本地验证，中继不存储凭证</div>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Card 6: Native Craft -->
+          <article class="bento-card span-12" style="grid-column: span 12;">
+            <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:1.2rem;">
+              <div style="max-width:600px;display:grid;gap:0.55rem;">
+                <h3 data-i18n="featCraftTitle">为工程师打磨的原生细节</h3>
+                <p data-i18n="featCraftDesc">
+                  Rust (eframe/egui) 构建轻量桌面端，零框架原生 Web 工作台；支持简体中文 / English / 日本語、浅色/深色/跟随系统同步，以及独立的 CLI HTTP/HTTPS 代理配置。
+                </p>
+              </div>
+              <div class="spec-pill-list" data-pills="craftPills">
+                <span class="spec-pill">简体中文 · EN · 日本語</span>
+                <span class="spec-pill">浅色 / 深色 / 跟随系统</span>
+                <span class="spec-pill">CLI 独立代理</span>
+                <span class="spec-pill">macOS &amp; Windows</span>
+                <span class="spec-pill">局域网本机网页 127.0.0.1:4318</span>
+                <span class="spec-pill">无框架极速前端</span>
+              </div>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3-Step Workflow -->
+    <section class="section">
+      <div class="container">
+        <div class="section-header centered reveal">
+          <div class="section-kicker" data-i18n="stepsKicker">THREE MINUTES TO FLOW</div>
+          <h2 class="section-title" data-i18n="stepsTitle">三步，把你的主力开发机连到口袋里</h2>
+        </div>
+
+        <div class="steps-grid reveal">
+          <div class="step-card">
+            <span class="step-num">STEP 01</span>
+            <h3 data-i18n="step1Title">在目标电脑打开 Naro</h3>
+            <p data-i18n="step1Desc">安装并登录 codex、claude 或 agy，解压运行 Naro.app（macOS）或 Naro.exe（Windows）。</p>
+          </div>
+          <div class="step-card">
+            <span class="step-num">STEP 02</span>
+            <h3 data-i18n="step2Title">配置中继地址与密钥</h3>
+            <p data-i18n="step2Desc">在「设备连接 → 本机配对」填入中继 HTTPS 地址与连接密钥，点击连接即建立单条出站 WSS。</p>
+          </div>
+          <div class="step-card">
+            <span class="step-num">STEP 03</span>
+            <h3 data-i18n="step3Title">扫码或输码，随时接力</h3>
+            <p data-i18n="step3Desc">手机打开网页扫码，或在另一台电脑的 Naro 中输入设备地址与 8 位配对码，立即续写工作流。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Self-Host & Quick Start -->
+    <section class="section" id="deploy">
+      <div class="container">
+        <div class="section-header reveal">
+          <div class="section-kicker" data-i18n="deployKicker">SELF-HOST IN SECONDS</div>
+          <h2 class="section-title" data-i18n="deployTitle">单文件 Go 中继，两分钟私有部署</h2>
+          <p class="section-desc" data-i18n="deployDesc">无需数据库，无需 Redis。可直接运行单个 Go 二进制，或通过 Docker / Docker Compose 一键容器化部署。</p>
+        </div>
+
+        <div class="deploy-studio reveal">
+          <div class="deploy-bar">
+            <div class="code-tabs" role="tablist" aria-label="Deployment snippets">
+              <button type="button" class="code-tab" role="tab" data-snippet="go" aria-selected="true" data-i18n="codeTabGo">Go 中继</button>
+              <button type="button" class="code-tab" role="tab" data-snippet="docker" aria-selected="false" data-i18n="codeTabDocker">Docker</button>
+              <button type="button" class="code-tab" role="tab" data-snippet="build" aria-selected="false" data-i18n="codeTabBuild">从源码构建</button>
+            </div>
+            <button type="button" class="copy-btn" id="copy-code-btn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <span id="copy-code-label" data-i18n="copyLabel">复制代码</span>
+            </button>
+          </div>
+          <pre class="code-body"><code id="deploy-code"></code></pre>
+        </div>
+
+        <div class="env-strip reveal">
+          <div class="env-card">
+            <code>NARO_PUBLIC_URL</code>
+            <p data-i18n="envPublicDesc">中继公开 HTTPS 地址（协议 + 主机名 + 可选端口）</p>
+          </div>
+          <div class="env-card">
+            <code>NARO_RELAY_TOKEN</code>
+            <p data-i18n="envTokenDesc">中继与目标电脑共享的 32–512 位无空格随机密钥</p>
+          </div>
+          <div class="env-card">
+            <code>NARO_RELAY_ADDR</code>
+            <p data-i18n="envAddrDesc">中继监听地址，默认 127.0.0.1:7319</p>
+          </div>
+          <div class="env-card">
+            <code>NARO_TLS_CERT / KEY</code>
+            <p data-i18n="envTlsDesc">可选；由 Go 中继直接提供 HTTPS 时指定证书与私钥</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Closing CTA -->
+    <section class="section" style="padding-top:2rem;">
+      <div class="container">
+        <div class="closing-cta reveal">
+          <img class="closing-icon" src="assets/icon-192.png" alt="Naro icon" width="60" height="60">
+          <h2 data-i18n="closingTitle">离开书桌，不必打断思路。</h2>
+          <p data-i18n="closingDesc">Naro 以 MIT 协议开源，支持 macOS 与 Windows。下载安装包，或直接编译运行你的私有中继。</p>
+          <div class="hero-cta-row">
+            <a class="btn btn-primary" href="https://github.com/RichieLuo/narolink/releases" target="_blank" rel="noreferrer" data-i18n="closingPrimary">前往 GitHub Releases 下载</a>
+            <a class="btn btn-secondary" href="https://github.com/RichieLuo/narolink" target="_blank" rel="noreferrer" data-i18n="closingSecondary">查看开源仓库</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;">
+        <strong style="color:var(--ink-strong);">Naro</strong>
+        <span>·</span>
+        <span data-i18n="footerMeta">MIT 许可证 · 随附字体 Noto Sans CJK SC (SIL OFL 1.1)</span>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/RichieLuo/narolink" target="_blank" rel="noreferrer">GitHub</a>
+        <a href="https://github.com/RichieLuo/narolink/blob/main/README.md" target="_blank" rel="noreferrer" data-i18n="footerZh">简体中文 README</a>
+        <a href="https://github.com/RichieLuo/narolink/blob/main/README.en.md" target="_blank" rel="noreferrer" data-i18n="footerEn">English README</a>
+        <a href="https://github.com/RichieLuo/narolink/blob/main/README.ja.md" target="_blank" rel="noreferrer" data-i18n="footerJa">日本語 README</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

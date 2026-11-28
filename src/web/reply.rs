@@ -50,6 +50,8 @@ pub(super) struct FilePreview {
     text: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     html: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_html: Option<String>,
 }
 
 #[derive(Clone)]
@@ -233,10 +235,12 @@ impl Previews {
                 .render(file.text.trim_start_matches('\u{feff}'), &[])
                 .html
             });
+            let code_html = crate::syntax::highlight_html(&file.text, &file.syntax);
             FilePreview {
                 name,
                 text: file.text,
                 html,
+                code_html,
             }
         });
         Some(file)
@@ -291,51 +295,97 @@ impl ReplyRenderer<'_> {
         let options =
             Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
         let mut links = Vec::new();
-        let events = Parser::new_ext(text, options).filter_map(|event| match event {
-            Event::Html(raw) | Event::InlineHtml(raw) => Some(Event::Text(raw)),
-            Event::Start(Tag::Link {
-                dest_url,
-                title,
-                id,
-                link_type,
-            }) => {
-                let href = self.link(&dest_url, &mut rendered.previews, true);
-                links.push(href.is_some());
-                href.map(|href| {
-                    Event::Start(Tag::Link {
-                        dest_url: href.into(),
-                        title,
-                        id,
-                        link_type,
-                    })
-                })
+        let mut events = Vec::new();
+        let mut code_block: Option<(String, String)> = None;
+        for event in Parser::new_ext(text, options) {
+            if let Some((_, buf)) = &mut code_block {
+                match event {
+                    Event::Text(chunk) => buf.push_str(&chunk),
+                    Event::End(TagEnd::CodeBlock) => {
+                        let (lang, content) = code_block.take().unwrap();
+                        if let Some(highlighted) = crate::syntax::highlight_html(&content, &lang) {
+                            let mut html_block = String::from("<pre><code");
+                            let lang_token = lang.split_whitespace().next().unwrap_or_default();
+                            if !lang_token.is_empty()
+                                && lang_token.bytes().all(|b| {
+                                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'+')
+                                })
+                            {
+                                html_block.push_str(" class=\"language-");
+                                html_block.push_str(lang_token);
+                                html_block.push('"');
+                            }
+                            html_block.push('>');
+                            html_block.push_str(&highlighted);
+                            html_block.push_str("</code></pre>\n");
+                            events.push(Event::Html(html_block.into()));
+                        } else {
+                            events.push(Event::Start(Tag::CodeBlock(
+                                pulldown_cmark::CodeBlockKind::Fenced(lang.into()),
+                            )));
+                            events.push(Event::Text(content.into()));
+                            events.push(Event::End(TagEnd::CodeBlock));
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
             }
-            Event::Start(Tag::Image {
-                dest_url,
-                title,
-                id,
-                ..
-            }) => {
-                let href = self
-                    .link(&dest_url, &mut rendered.previews, false)
-                    .filter(|_| !links.contains(&true));
-                links.push(href.is_some());
-                href.map(|href| {
-                    Event::Start(Tag::Link {
-                        dest_url: href.into(),
-                        title,
-                        id,
-                        link_type: LinkType::Inline,
+            let mapped = match event {
+                Event::Start(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(lang)))
+                    if crate::syntax::resolve_language(&lang).is_some() =>
+                {
+                    code_block = Some((lang.into_string(), String::new()));
+                    None
+                }
+                Event::Html(raw) | Event::InlineHtml(raw) => Some(Event::Text(raw)),
+                Event::Start(Tag::Link {
+                    dest_url,
+                    title,
+                    id,
+                    link_type,
+                }) => {
+                    let href = self.link(&dest_url, &mut rendered.previews, true);
+                    links.push(href.is_some());
+                    href.map(|href| {
+                        Event::Start(Tag::Link {
+                            dest_url: href.into(),
+                            title,
+                            id,
+                            link_type,
+                        })
                     })
-                })
+                }
+                Event::Start(Tag::Image {
+                    dest_url,
+                    title,
+                    id,
+                    ..
+                }) => {
+                    let href = self
+                        .link(&dest_url, &mut rendered.previews, false)
+                        .filter(|_| !links.contains(&true));
+                    links.push(href.is_some());
+                    href.map(|href| {
+                        Event::Start(Tag::Link {
+                            dest_url: href.into(),
+                            title,
+                            id,
+                            link_type: LinkType::Inline,
+                        })
+                    })
+                }
+                Event::End(TagEnd::Link | TagEnd::Image) => links
+                    .pop()
+                    .unwrap_or(false)
+                    .then_some(Event::End(TagEnd::Link)),
+                event => Some(event),
+            };
+            if let Some(event) = mapped {
+                events.push(event);
             }
-            Event::End(TagEnd::Link | TagEnd::Image) => links
-                .pop()
-                .unwrap_or(false)
-                .then_some(Event::End(TagEnd::Link)),
-            event => Some(event),
-        });
-        html::push_html(&mut rendered.html, events);
+        }
+        html::push_html(&mut rendered.html, events.into_iter());
         for path in generated {
             if let Some(preview) = self.local_image(path)
                 && rendered.previews.len() < 8

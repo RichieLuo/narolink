@@ -154,7 +154,9 @@ impl WsReader {
                         "invalid control frame",
                     ));
                 }
-            } else if len > max_len as u64 || (assembled.len() as u64).saturating_add(len) > max_len as u64 {
+            } else if len > max_len as u64
+                || (assembled.len() as u64).saturating_add(len) > max_len as u64
+            {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "frame exceeds size limit",

@@ -60,12 +60,28 @@ EOF
 
 plutil -lint "$app/Contents/Info.plist"
 signing_identity=${NAROLINK_MACOS_SIGN_IDENTITY:-$(git config --local --get narolink.macosSigningIdentity 2>/dev/null || true)}
-if [ -n "$signing_identity" ] && [ "$signing_identity" != - ]; then
+notary_profile=${NAROLINK_MACOS_NOTARY_PROFILE:-}
+if [ -n "$notary_profile" ]; then
+    if [ -z "$signing_identity" ] || [ "$signing_identity" = - ]; then
+        printf '%s\n' 'Set a Developer ID Application signing identity for notarization.' >&2
+        exit 1
+    fi
+    codesign --force --options runtime --timestamp --sign "$signing_identity" "$app"
+elif [ -n "$signing_identity" ] && [ "$signing_identity" != - ]; then
     codesign --force --sign "$signing_identity" "$app"
 else
     codesign --force --sign - --timestamp=none "$app"
 fi
 codesign --verify --strict "$app"
 ditto -c -k --norsrc --keepParent "$app" "$staging/Naro.zip"
+if [ -n "$notary_profile" ]; then
+    xcrun notarytool submit "$staging/Naro.zip" --keychain-profile "$notary_profile" --wait
+    xcrun stapler staple "$app"
+    xcrun stapler validate "$app"
+    rm "$staging/Naro.zip"
+    ditto -c -k --sequesterRsrc --keepParent "$app" "$staging/Naro.zip"
+    ditto -x -k "$staging/Naro.zip" "$staging/notarized"
+    xcrun stapler validate "$staging/notarized/Naro.app"
+fi
 mv -f "$staging/Naro.zip" "$archive"
 printf '%s\n' "$archive"

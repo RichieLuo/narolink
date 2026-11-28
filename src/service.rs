@@ -58,6 +58,7 @@ struct Shared {
     recent_sessions: Mutex<HashMap<SessionKey, Session>>,
     transcripts: Mutex<HashMap<SessionKey, Timed<Transcript>>>,
     runs: Mutex<HashMap<String, Arc<Run>>>,
+    restarting_for_update: AtomicBool,
     token_usage: Mutex<UsageCache>,
     title_revision: AtomicU64,
 }
@@ -702,6 +703,9 @@ impl Service {
         });
         {
             let mut runs = self.0.runs.lock().unwrap();
+            if self.0.restarting_for_update.load(Ordering::Relaxed) {
+                return Err("Naro 正在重启更新，请稍后重试".into());
+            }
             runs.retain(|_, run| {
                 run.view
                     .lock()
@@ -1114,6 +1118,22 @@ impl Service {
         for run in self.0.runs.lock().unwrap().values() {
             run.stop();
         }
+    }
+
+    pub fn reserve_update_restart(&self) -> bool {
+        // Check and reserve under the same lock used to admit work from any client.
+        let runs = self.0.runs.lock().unwrap();
+        if runs
+            .values()
+            .any(|run| run.view.lock().unwrap().finished.is_none())
+        {
+            return false;
+        }
+        !self.0.restarting_for_update.swap(true, Ordering::Relaxed)
+    }
+
+    pub fn release_update_restart(&self) {
+        self.0.restarting_for_update.store(false, Ordering::Relaxed);
     }
 }
 

@@ -43,6 +43,50 @@ fn follow_up(id: &str, mode: SendMode) -> FollowUp {
 }
 
 #[test]
+fn update_restart_waits_for_hosted_work_and_then_closes_admission() {
+    let directory = tempfile::tempdir().unwrap();
+    let service = Service::default();
+    let run = Arc::new(Run {
+        cwd: directory.path().to_owned(),
+        view: Mutex::new(State {
+            info: snapshot(),
+            composer_permission: None,
+            images: HashMap::new(),
+            next_image_index: 0,
+            sent: 0,
+            output_bytes: 0,
+            approval: None,
+            questions: VecDeque::new(),
+            finished: None,
+        }),
+        cancel: AtomicBool::new(false),
+        revision: watch::Sender::new(RunRevision::default()),
+    });
+    service
+        .0
+        .runs
+        .lock()
+        .unwrap()
+        .insert("run".into(), run.clone());
+    assert!(!service.reserve_update_restart());
+    run.edit(false).finish(Ok(()), false);
+    assert!(service.reserve_update_restart());
+    assert!(!service.reserve_update_restart());
+    let request: TurnRequest = serde_json::from_value(serde_json::json!({
+        "provider": "codex",
+        "cwd": directory.path(),
+        "prompt": "New browser request",
+    }))
+    .unwrap();
+    assert_eq!(
+        service.start(request).unwrap_err(),
+        "Naro 正在重启更新，请稍后重试"
+    );
+    service.release_update_restart();
+    assert!(service.reserve_update_restart());
+}
+
+#[test]
 fn live_snapshot_exposes_only_the_labels_of_local_files() {
     let mut snapshot = snapshot();
     snapshot.local_files.push(attachments::LocalAttachment {

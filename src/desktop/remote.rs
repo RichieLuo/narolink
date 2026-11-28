@@ -156,6 +156,9 @@ impl RemoteClient {
         if let Some(commit) = request.commit.as_deref() {
             builder = builder.query(&[("commit", commit)]);
         }
+        if request.full_context {
+            builder = builder.query(&[("full_context", "true")]);
+        }
         read_json(send(builder)?)
     }
 

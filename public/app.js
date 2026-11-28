@@ -2473,6 +2473,12 @@ function showFilePreview(source) {
   const content = $("file-preview-content");
   if (canRender && !source) {
     content.replaceChildren(renderedMarkup(file.text, file.html));
+  } else if (typeof file.code_html === "string") {
+    const pre = element("pre", "", "file-preview-raw");
+    const code = document.createElement("code");
+    code.innerHTML = file.code_html;
+    pre.append(code);
+    content.replaceChildren(pre);
   } else {
     content.replaceChildren(element("pre", file.text, "file-preview-raw"));
   }

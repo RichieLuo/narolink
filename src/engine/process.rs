@@ -20,6 +20,9 @@ const MAX_INPUT_FRAME: usize = 24 * 1024 * 1024;
 /// Resolve known npm packages without passing user input to cmd.exe or a shell.
 pub(super) fn cli_command(provider: Provider) -> Result<Command, String> {
     let path = cli_search_path()?;
+    if let Some(executable) = crate::settings::cli_paths()?.get(&provider) {
+        return configured_cli_command(provider, Path::new(executable), path);
+    }
     let name = match provider {
         Provider::Codex => "codex",
         Provider::Claude => "claude",
@@ -36,7 +39,59 @@ pub(super) fn cli_command(provider: Provider) -> Result<Command, String> {
             let home = directories::BaseDirs::new()?;
             executable_on_path(name, home.home_dir().join(".local/bin").as_os_str())
         })
-        .ok_or("未找到 AI CLI，请安装对应的 CLI 或指定其可执行文件。")?;
+        .ok_or("未找到 AI CLI。请安装对应的 CLI，或在 Naro 桌面端设置中填写 CLI 路径。")?;
+    command_for_executable(provider, executable, path)
+}
+
+pub fn validate_cli_path(provider: Provider, executable: &Path) -> Result<(), String> {
+    configured_cli_command(provider, executable, cli_search_path()?).map(|_| ())
+}
+
+fn configured_cli_command(
+    provider: Provider,
+    executable: &Path,
+    path: OsString,
+) -> Result<Command, String> {
+    if !executable.is_absolute() {
+        return Err("请输入 CLI 可执行文件的绝对路径。".into());
+    }
+    let metadata = executable
+        .metadata()
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .ok_or("找不到指定的 CLI 文件，请检查路径。")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if !javascript_cli(executable) && metadata.permissions().mode() & 0o111 == 0 {
+            return Err("指定的 CLI 文件没有执行权限。".into());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = metadata;
+    // A CLI installed by a Node version manager may need the node beside it in Finder launches.
+    let path = std::env::join_paths(
+        executable
+            .parent()
+            .into_iter()
+            .map(Path::to_owned)
+            .chain(std::env::split_paths(&path)),
+    )
+    .unwrap_or(path);
+    command_for_executable(provider, executable.to_owned(), path)
+}
+
+fn javascript_cli(executable: &Path) -> bool {
+    executable
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("js") || ext.eq_ignore_ascii_case("mjs"))
+}
+
+fn command_for_executable(
+    provider: Provider,
+    executable: PathBuf,
+    path: OsString,
+) -> Result<Command, String> {
     #[cfg(windows)]
     let executable = if provider == Provider::Codex {
         let desktop_bin = directories::BaseDirs::new().map(|dirs| {
@@ -49,10 +104,11 @@ pub(super) fn cli_command(provider: Provider) -> Result<Command, String> {
     } else {
         executable
     };
-    if executable
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
-        || executable.extension().is_none() && cfg!(windows)
+    if executable.extension().is_some_and(|ext| {
+        ext.eq_ignore_ascii_case("cmd")
+            || ext.eq_ignore_ascii_case("bat")
+            || cfg!(windows) && ext.eq_ignore_ascii_case("ps1")
+    }) || executable.extension().is_none() && cfg!(windows)
     {
         let parent = executable.parent().ok_or("Invalid CLI executable")?;
         let package = match provider {
@@ -75,10 +131,7 @@ pub(super) fn cli_command(provider: Provider) -> Result<Command, String> {
         }
         return Err("Unsupported CLI shim; choose the native executable or install the standard npm package".into());
     }
-    let mut command = if executable
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("js") || e.eq_ignore_ascii_case("mjs"))
-    {
+    let mut command = if javascript_cli(&executable) {
         let mut command =
             Command::new(executable_on_path("node", &path).ok_or("Node.js is required")?);
         command.arg(executable);
@@ -497,11 +550,11 @@ fn kill_tree(pid: u32) {
     }
 }
 #[cfg(windows)]
-struct WindowsJob(windows_sys::Win32::Foundation::HANDLE);
+struct WindowsJob(std::os::windows::io::OwnedHandle);
 #[cfg(windows)]
 impl WindowsJob {
     fn attach(child: &Child) -> Result<Self, String> {
-        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         use windows_sys::Win32::System::JobObjects::*;
         // SAFETY: Handles remain owned here/by Child; structures have the exact API size.
         unsafe {
@@ -509,7 +562,8 @@ impl WindowsJob {
             if handle.is_null() {
                 return Err("Cannot create AI process isolation job".into());
             }
-            let job = Self(handle);
+            let job = Self(OwnedHandle::from_raw_handle(handle));
+            let handle = job.0.as_raw_handle();
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
             if SetInformationJobObject(
@@ -523,14 +577,6 @@ impl WindowsJob {
                 return Err("Cannot isolate AI process tree; refusing unsafe startup".into());
             }
             Ok(job)
-        }
-    }
-}
-#[cfg(windows)]
-impl Drop for WindowsJob {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.0);
         }
     }
 }

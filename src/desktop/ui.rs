@@ -26,8 +26,12 @@ const ACTION_DIALOG_INSET: i8 = 22;
 
 fn action_menu_row(ui: &mut Ui, label: &str) -> bool {
     let label = Language::in_ui(ui).text(label);
-    ui.add(Button::new((label, Atom::grow())).frame_when_inactive(false)
-        .min_size(vec2(ui.available_width(), 30.))).clicked()
+    ui.add(
+        Button::new((label, Atom::grow()))
+            .frame_when_inactive(false)
+            .min_size(vec2(ui.available_width(), 30.)),
+    )
+    .clicked()
 }
 
 fn action_dialog_field(ui: &mut Ui, label: &str, edit: TextEdit<'_>) -> egui::Response {
@@ -258,14 +262,25 @@ fn action_dialog_footer(
 fn startup_settings(ui: &mut Ui, draft: &mut StartupDraft, provider: Provider, new: bool) {
     let language = Language::in_ui(ui);
     let palette = Palette::of(ui);
-    ui.label(RichText::new(language.text("此设置仅用于下一次启动，不会改变正在运行的回复。"))
-        .small().color(palette.muted));
+    ui.label(
+        RichText::new(language.text("此设置仅用于下一次启动，不会改变正在运行的回复。"))
+            .small()
+            .color(palette.muted),
+    );
     ui.label(language.text("附加目录"));
-    ui.add(TextEdit::multiline(&mut draft.additional_directories).desired_rows(2)
-        .desired_width(f32::INFINITY).hint_text(language.text("每行一个绝对路径")));
+    ui.add(
+        TextEdit::multiline(&mut draft.additional_directories)
+            .desired_rows(2)
+            .desired_width(f32::INFINITY)
+            .hint_text(language.text("每行一个绝对路径")),
+    );
     ui.label(language.text("文件上下文"));
-    ui.add(TextEdit::multiline(&mut draft.context_files).desired_rows(2)
-        .desired_width(f32::INFINITY).hint_text(language.text("每行一个绝对路径")));
+    ui.add(
+        TextEdit::multiline(&mut draft.context_files)
+            .desired_rows(2)
+            .desired_width(f32::INFINITY)
+            .hint_text(language.text("每行一个绝对路径")),
+    );
     if provider != Provider::Codex {
         ui.label(language.text("Agent 名称"));
         ui.add(TextEdit::singleline(&mut draft.agent).desired_width(f32::INFINITY));
@@ -279,13 +294,19 @@ fn startup_settings(ui: &mut Ui, draft: &mut StartupDraft, provider: Provider, n
 fn render_context_details(ui: &mut Ui, report: Option<&engine::work::ContextUsage>) {
     let language = Language::in_ui(ui);
     let palette = Palette::of(ui);
-    ui.label(RichText::new(language.text("最近一次引擎报告")).small().color(palette.muted));
+    ui.label(
+        RichText::new(language.text("最近一次引擎报告"))
+            .small()
+            .color(palette.muted),
+    );
     for (label, value) in [
         ("已用", report.and_then(|report| report.used)),
         ("上限", report.and_then(|report| report.limit)),
         ("剩余", report.and_then(|report| report.remaining)),
     ] {
-        let value = value.map(|n| n.to_string()).unwrap_or_else(|| language.text("引擎未报告").into());
+        let value = value
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| language.text("引擎未报告").into());
         ui.label(format!("{} · {value}", language.text(label)));
     }
     ui.add_space(8.);
@@ -295,56 +316,107 @@ fn render_rewind_preview(ui: &mut Ui, value: &serde_json::Value) {
     let language = Language::in_ui(ui);
     let palette = Palette::of(ui);
     ui.separator();
-    ui.label(RichText::new(language.text("文件列表与增删统计，不是完整差异。"))
-        .small().color(palette.muted));
+    ui.label(
+        RichText::new(language.text("文件列表与增删统计，不是完整差异。"))
+            .small()
+            .color(palette.muted),
+    );
     if let Some(files) = value["filesChanged"].as_array() {
         for file in files {
             if let Some(path) = file.as_str().or_else(|| file["path"].as_str()) {
                 ui.add(Label::new(path).wrap().selectable(true));
             }
         }
-        if files.is_empty() { ui.label(language.text("没有需要回退的文件")); }
+        if files.is_empty() {
+            ui.label(language.text("没有需要回退的文件"));
+        }
     } else {
         ui.label(language.text("引擎未返回文件列表"));
     }
-    let number = |key: &str| value[key].as_u64().map(|n| n.to_string()).unwrap_or_else(|| language.text("未知").into());
-    ui.label(format!("+{} / −{}", number("insertions"), number("deletions")));
+    let number = |key: &str| {
+        value[key]
+            .as_u64()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| language.text("未知").into())
+    };
+    ui.label(format!(
+        "+{} / −{}",
+        number("insertions"),
+        number("deletions")
+    ));
 }
 
 fn render_mcp_servers(ui: &mut Ui, value: &serde_json::Value) {
     let language = Language::in_ui(ui);
     let palette = Palette::of(ui);
-    let servers = value["data"].as_array().or_else(|| value["mcpServers"].as_array())
-        .or_else(|| value["servers"].as_array()).or_else(|| value.as_array());
+    let servers = value["data"]
+        .as_array()
+        .or_else(|| value["mcpServers"].as_array())
+        .or_else(|| value["servers"].as_array())
+        .or_else(|| value.as_array());
     let Some(servers) = servers else {
-        ui.label(RichText::new(language.text("当前引擎未报告可读条目")).small().color(palette.muted));
+        ui.label(
+            RichText::new(language.text("当前引擎未报告可读条目"))
+                .small()
+                .color(palette.muted),
+        );
         return;
     };
-    if servers.is_empty() { ui.label(language.text("没有已配置的 MCP 服务器")); }
+    if servers.is_empty() {
+        ui.label(language.text("没有已配置的 MCP 服务器"));
+    }
     for (index, server) in servers.iter().enumerate() {
         ui.push_id(index, |ui| {
-            let name = server["name"].as_str().unwrap_or(language.text("未命名服务器"));
+            let name = server["name"]
+                .as_str()
+                .unwrap_or(language.text("未命名服务器"));
             ui.strong(name);
             for (label, key) in [("连接状态", "status"), ("授权状态", "authStatus")] {
-                if let Some(status) = server[key].as_str().or_else(|| (key == "status").then(|| server["runtimeStatus"].as_str()).flatten()) {
+                if let Some(status) = server[key].as_str().or_else(|| {
+                    (key == "status")
+                        .then(|| server["runtimeStatus"].as_str())
+                        .flatten()
+                }) {
                     let status = match status {
-                        "connected" => "已连接", "failed" => "连接失败", "pending" => "连接中",
-                        "disabled" => "已停用", "needs-auth" | "notLoggedIn" => "需要授权",
-                        "oAuth" => "已授权", "bearerToken" => "已配置令牌", "unsupported" => "不支持授权",
+                        "connected" => "已连接",
+                        "failed" => "连接失败",
+                        "pending" => "连接中",
+                        "disabled" => "已停用",
+                        "needs-auth" | "notLoggedIn" => "需要授权",
+                        "oAuth" => "已授权",
+                        "bearerToken" => "已配置令牌",
+                        "unsupported" => "不支持授权",
                         other => other,
                     };
-                    ui.label(RichText::new(format!("{} · {}", language.text(label), language.text(status))).small().color(palette.muted));
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {}",
+                            language.text(label),
+                            language.text(status)
+                        ))
+                        .small()
+                        .color(palette.muted),
+                    );
                 }
             }
-            if let Some(error) = server["error"].as_str() { ui.label(RichText::new(error).color(palette.warn)); }
+            if let Some(error) = server["error"].as_str() {
+                ui.label(RichText::new(error).color(palette.warn));
+            }
             let tools: Vec<&str> = if let Some(tools) = server["tools"].as_object() {
                 tools.keys().map(String::as_str).collect()
             } else if let Some(tools) = server["tools"].as_array() {
-                tools.iter().filter_map(|tool| tool.as_str().or_else(|| tool["name"].as_str())).collect()
-            } else { Vec::new() };
+                tools
+                    .iter()
+                    .filter_map(|tool| tool.as_str().or_else(|| tool["name"].as_str()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             if !tools.is_empty() {
                 ui.collapsing(language.text("工具"), |ui| {
-                    for name in tools { ui.add(Label::new(name).wrap()); }
+                    for name in tools {
+                        ui.add(Label::new(name).wrap());
+                    }
                 });
             }
             ui.add_space(6.);
@@ -355,30 +427,61 @@ fn render_mcp_servers(ui: &mut Ui, value: &serde_json::Value) {
 fn render_extensions(ui: &mut Ui, value: &serde_json::Value, full: bool) {
     let language = Language::in_ui(ui);
     let palette = Palette::of(ui);
-    if !full { render_mcp_servers(ui, value); return; }
+    if !full {
+        render_mcp_servers(ui, value);
+        return;
+    }
     ui.strong(language.text("MCP 状态"));
     render_mcp_servers(ui, &value["mcp"]);
-    for (label, key, error_key) in [("Hooks", "hooks", "hooks_error"), ("插件", "plugins", "plugins_error"), ("应用", "apps", "apps_error")] {
+    for (label, key, error_key) in [
+        ("Hooks", "hooks", "hooks_error"),
+        ("插件", "plugins", "plugins_error"),
+        ("应用", "apps", "apps_error"),
+    ] {
         ui.separator();
         ui.strong(language.text(label));
         if let Some(error) = value[error_key].as_str() {
             ui.label(RichText::new(error).color(palette.warn));
         } else {
             let result = &value[key];
-            let rows = result.as_array().or_else(|| result["data"].as_array())
-                .or_else(|| result[key].as_array()).or_else(|| result["installed"].as_array());
+            let rows = result
+                .as_array()
+                .or_else(|| result["data"].as_array())
+                .or_else(|| result[key].as_array())
+                .or_else(|| result["installed"].as_array());
             if let Some(rows) = rows {
                 for row in rows {
-                    if let Some(name) = row["name"].as_str().or_else(|| row["displayName"].as_str()) {
+                    if let Some(name) = row["name"].as_str().or_else(|| row["displayName"].as_str())
+                    {
                         ui.add(Label::new(name).wrap());
                     }
                 }
-                if rows.is_empty() { ui.label(RichText::new(language.text("无条目")).small().color(palette.muted)); }
-                else if !rows.iter().any(|row| row["name"].is_string() || row["displayName"].is_string()) {
-                    ui.label(RichText::new(language.text("已读取状态；详细配置请在原生 CLI 中查看。")).small().color(palette.muted));
+                if rows.is_empty() {
+                    ui.label(
+                        RichText::new(language.text("无条目"))
+                            .small()
+                            .color(palette.muted),
+                    );
+                } else if !rows
+                    .iter()
+                    .any(|row| row["name"].is_string() || row["displayName"].is_string())
+                {
+                    ui.label(
+                        RichText::new(language.text("已读取状态；详细配置请在原生 CLI 中查看。"))
+                            .small()
+                            .color(palette.muted),
+                    );
                 }
             } else {
-                ui.label(RichText::new(language.text(if result.is_null() { "引擎未报告" } else { "已读取状态；详细配置请在原生 CLI 中查看。" })).small().color(palette.muted));
+                ui.label(
+                    RichText::new(language.text(if result.is_null() {
+                        "引擎未报告"
+                    } else {
+                        "已读取状态；详细配置请在原生 CLI 中查看。"
+                    }))
+                    .small()
+                    .color(palette.muted),
+                );
             }
         }
     }
@@ -423,6 +526,28 @@ fn window_drag_area(ui: &Ui, rect: Rect) {
 pub(super) struct PairingQr {
     link: String,
     texture: Option<egui::TextureHandle>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub(super) enum SettingsTab {
+    #[default]
+    General,
+    Session,
+    Cli,
+    Updates,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 4] = [Self::General, Self::Session, Self::Cli, Self::Updates];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "通用",
+            Self::Session => "会话",
+            Self::Cli => "CLI",
+            Self::Updates => "软件更新",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -635,6 +760,7 @@ impl Desktop {
             )
             .show(ctx, |ui| {
                 let empty = self.view.is_new();
+                let menu_press = chat_menu::begin(ui, ui.max_rect());
                 egui::ScrollArea::vertical()
                     .id_salt(("chat", self.epoch))
                     .stick_to_bottom(!empty)
@@ -649,6 +775,14 @@ impl Desktop {
                         }
                         ui.add_space(20.);
                     });
+                if let Some(path) = chat_menu::show(ui, menu_press) {
+                    let cwd = self
+                        .view
+                        .session
+                        .as_ref()
+                        .map_or_else(|| self.folder.clone(), |session| session.cwd.clone());
+                    self.files.open(ctx, path, &cwd);
+                }
             });
         self.devices(ctx);
         if self.quota_dialog {
@@ -657,6 +791,9 @@ impl Desktop {
             self.questions(ctx);
         }
         self.paint_action_dialog(ctx);
+        if let Some(command) = self.git.show_diff_modal(ctx) {
+            self.handle_git_command(ctx, command);
+        }
         self.thumbnails.show_preview(ctx);
         #[cfg(not(target_os = "macos"))]
         if let Some((editor_id, dialog)) = &mut self.attachment_picker {
@@ -795,38 +932,63 @@ impl Desktop {
         let language = self.language;
         let ready = !self.view.busy() && !self.native_pending();
         if !ready {
-            ui.label(RichText::new(language.text("运行或操作结束后可用")).small().color(Palette::of(ui).muted));
+            ui.label(
+                RichText::new(language.text("运行或操作结束后可用"))
+                    .small()
+                    .color(Palette::of(ui).muted),
+            );
         }
         let mut body = None;
         let mut load = None;
         ui.add_enabled_ui(ready, |ui| {
             if action_menu_row(ui, "重命名") {
-                body = Some(ActionBody::Rename { name: self.view.title.clone().unwrap_or_default() });
+                body = Some(ActionBody::Rename {
+                    name: self.view.title.clone().unwrap_or_default(),
+                });
             }
             if action_menu_row(ui, "创建分支") {
-                body = Some(ActionBody::Confirm { label: "创建分支", action: A::Fork });
+                body = Some(ActionBody::Confirm {
+                    label: "创建分支",
+                    action: A::Fork,
+                });
             }
             match self.view.provider {
                 Provider::Codex => {
                     if action_menu_row(ui, "目标") {
-                        body = Some(ActionBody::Goal { objective: String::new(), budget: String::new(), loaded: false });
+                        body = Some(ActionBody::Goal {
+                            objective: String::new(),
+                            budget: String::new(),
+                            loaded: false,
+                        });
                         load = Some(A::GoalGet);
                     }
                     if action_menu_row(ui, "Review") {
-                        body = Some(ActionBody::Review { branch_mode: false, branch: String::new() });
+                        body = Some(ActionBody::Review {
+                            branch_mode: false,
+                            branch: String::new(),
+                        });
                     }
                     if action_menu_row(ui, "归档") {
-                        body = Some(ActionBody::Confirm { label: "归档", action: A::Archive });
+                        body = Some(ActionBody::Confirm {
+                            label: "归档",
+                            action: A::Archive,
+                        });
                     }
                     // Session metadata does not identify archived rows, so restoration
                     // remains an explicit operation instead of guessing archive state.
                     if action_menu_row(ui, "恢复归档") {
-                        body = Some(ActionBody::Confirm { label: "恢复归档", action: A::Unarchive });
+                        body = Some(ActionBody::Confirm {
+                            label: "恢复归档",
+                            action: A::Unarchive,
+                        });
                     }
                 }
                 Provider::Claude => {
                     if action_menu_row(ui, "文件回退") {
-                        body = Some(ActionBody::Rewind { selected: None, preview: None });
+                        body = Some(ActionBody::Rewind {
+                            selected: None,
+                            preview: None,
+                        });
                     }
                 }
                 Provider::Antigravity => {}
@@ -834,18 +996,26 @@ impl Desktop {
             ui.separator();
             ui.collapsing(language.text("高级操作"), |ui| {
                 if action_menu_row(ui, "MCP 状态") {
-                    body = Some(ActionBody::Extensions { result: None, full: false });
+                    body = Some(ActionBody::Extensions {
+                        result: None,
+                        full: false,
+                    });
                     load = Some(A::McpStatus);
                 }
                 if self.view.provider == Provider::Codex && action_menu_row(ui, "扩展状态") {
-                    body = Some(ActionBody::Extensions { result: None, full: true });
+                    body = Some(ActionBody::Extensions {
+                        result: None,
+                        full: true,
+                    });
                     load = Some(A::Extensions);
                 }
             });
         });
         if let Some(body) = body {
             self.open_action(body);
-            if let Some(action) = load { self.request_native_action(ctx, action); }
+            if let Some(action) = load {
+                self.request_native_action(ctx, action);
+            }
             ui.close();
         }
     }
@@ -1377,6 +1547,18 @@ impl Desktop {
                                     palette.muted
                                 },
                             );
+                            if self.updates.has_update() {
+                                let rect = settings.response.rect;
+                                ui.painter().circle_filled(
+                                    rect.right_center() - vec2(6., 0.),
+                                    2.5,
+                                    palette.accent,
+                                );
+                                settings
+                                    .response
+                                    .clone()
+                                    .on_hover_text(language.text("有可用更新"));
+                            }
                             if settings.response.clicked() {
                                 self.open_settings();
                             }
@@ -1389,7 +1571,11 @@ impl Desktop {
     fn sidebar_native_search(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let language = self.language;
         let palette = Palette::of(ui);
-        if self.search.trim().is_empty() || self.filters.is_some_and(|provider| provider != Provider::Codex) {
+        if self.search.trim().is_empty()
+            || self
+                .filters
+                .is_some_and(|provider| provider != Provider::Codex)
+        {
             if self.native_search.pending || !self.native_search.hits.is_empty() {
                 self.native_search.serial += 1;
                 self.native_search.pending = false;
@@ -1407,7 +1593,12 @@ impl Desktop {
             .color(palette.muted),
         );
         ui.collapsing(language.text("Codex 原生全文搜索"), |ui| {
-            let changed = ui.checkbox(&mut self.native_search.archived, language.text("包含已归档会话")).changed();
+            let changed = ui
+                .checkbox(
+                    &mut self.native_search.archived,
+                    language.text("包含已归档会话"),
+                )
+                .changed();
             if changed || self.native_search.query != self.search {
                 self.native_search.serial += 1;
                 self.native_search.pending = false;
@@ -1415,7 +1606,13 @@ impl Desktop {
                 self.native_search.error = None;
                 self.native_search.query = self.search.clone();
             }
-            if ui.add_enabled(!self.native_search.pending, Button::new(language.text("全文搜索"))).clicked() {
+            if ui
+                .add_enabled(
+                    !self.native_search.pending,
+                    Button::new(language.text("全文搜索")),
+                )
+                .clicked()
+            {
                 self.native_search.serial += 1;
                 let serial = self.native_search.serial;
                 let query = self.search.clone();
@@ -1430,8 +1627,20 @@ impl Desktop {
                     )
                 });
             }
-            if self.native_search.pending { ui.label(RichText::new(language.text("正在搜索…")).small().color(palette.muted)); }
-            if let Some(error) = &self.native_search.error { ui.label(RichText::new(language.text(error)).small().color(palette.warn)); }
+            if self.native_search.pending {
+                ui.label(
+                    RichText::new(language.text("正在搜索…"))
+                        .small()
+                        .color(palette.muted),
+                );
+            }
+            if let Some(error) = &self.native_search.error {
+                ui.label(
+                    RichText::new(language.text(error))
+                        .small()
+                        .color(palette.warn),
+                );
+            }
             let mut open = None;
             egui::ScrollArea::vertical()
                 .id_salt("native search hits")
@@ -1867,9 +2076,9 @@ impl Desktop {
                         .set_title(language.text("选择 Naro 的工作目录"))
                         .pick_folder()
                 {
-                    if !project
-                        .is_some_and(|project| project.roots.iter().any(|root| path.starts_with(root)))
-                    {
+                    if !project.is_some_and(|project| {
+                        project.roots.iter().any(|root| path.starts_with(root))
+                    }) {
                         self.view.project_id = None;
                     }
                     self.view.clear_startup_settings();
@@ -1907,7 +2116,9 @@ impl Desktop {
             egui::CollapsingHeader::new(language.text("更多设置"))
                 .id_salt(("startup settings", self.epoch, self.view.provider))
                 .default_open(false)
-                .show(ui, |ui| startup_settings(ui, &mut self.view.startup, self.view.provider, true));
+                .show(ui, |ui| {
+                    startup_settings(ui, &mut self.view.startup, self.view.provider, true)
+                });
         });
     }
 
@@ -2363,14 +2574,26 @@ impl Desktop {
                         self.composer_attachments(ui, editor_id);
                         self.permission_settings(ui, busy);
                         if !self.view.is_new() && !running {
-                            let trigger = composer_tool(ui, Icon::Sliders, language.text("更多设置"), palette.muted);
+                            let trigger = composer_tool(
+                                ui,
+                                Icon::Sliders,
+                                language.text("更多设置"),
+                                palette.muted,
+                            );
                             egui::Popup::menu(&trigger)
                                 .align(egui::RectAlign::TOP_START)
                                 .frame(popup(palette, Margin::same(12)))
                                 .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                                 .show(|ui| {
                                     ui.set_width(300.);
-                                    ui.add_enabled_ui(!self.view.pending, |ui| startup_settings(ui, &mut self.view.startup, self.view.provider, false));
+                                    ui.add_enabled_ui(!self.view.pending, |ui| {
+                                        startup_settings(
+                                            ui,
+                                            &mut self.view.startup,
+                                            self.view.provider,
+                                            false,
+                                        )
+                                    });
                                 });
                         }
                     });
@@ -2832,7 +3055,9 @@ impl Desktop {
         let choices = &catalog.permission_modes;
         let default = catalog.default_permission_mode;
         let selected = self.view.selected_permission(Some(catalog)).or(default);
-        let permission = choices.iter().find(|mode| Some(mode.id.as_str()) == selected);
+        let permission = choices
+            .iter()
+            .find(|mode| Some(mode.id.as_str()) == selected);
         let running = self
             .view
             .snapshot
@@ -2989,72 +3214,134 @@ impl Desktop {
             return;
         };
         let mut save = false;
+        let mut save_paths = false;
+        let mut restart = false;
+        let has_update = self.updates.has_update();
+        egui::SidePanel::left("settings-tabs")
+            .exact_width(196.)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(palette.sidebar)
+                    .inner_margin(Margin::symmetric(13, 16)),
+            )
+            .show(ctx, |ui| {
+                let width = ui.available_width();
+                for choice in SettingsTab::ALL {
+                    let selected = page.tab == choice;
+                    let button = Button::new((
+                        RichText::new(language.text(choice.label()))
+                            .size(13.5)
+                            .color(if selected {
+                                palette.accent
+                            } else {
+                                palette.ink
+                            }),
+                        egui::Atom::grow(),
+                    ))
+                    .min_size(vec2(width, 34.))
+                    .selected(selected)
+                    .frame_when_inactive(selected);
+                    let response = ui.add(button);
+                    if choice == SettingsTab::Updates && has_update {
+                        ui.painter().circle_filled(
+                            response.rect.right_center() - vec2(10., 0.),
+                            2.5,
+                            palette.accent,
+                        );
+                    }
+                    if response.clicked() {
+                        page.tab = choice;
+                    }
+                    ui.add_space(2.);
+                }
+                let rect = ui.max_rect();
+                ui.painter().vline(
+                    rect.right() + 13. - 0.5,
+                    ui.ctx().content_rect().y_range(),
+                    Stroke::new(1., palette.line),
+                );
+            });
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(palette.canvas))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
-                    .id_salt("settings page")
+                    .id_salt(("settings page", page.tab))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(24.);
-                        centered(ui, 600., |ui| {
-                            settings_group(ui, language.text("通用"), |ui| {
-                                ui.label(language.text("界面语言"));
-                                egui::ComboBox::from_id_salt("interface language")
-                                    .width(160.)
-                                    .selected_text(self.language.name())
-                                    .show_ui(ui, |ui| {
-                                        for choice in Language::ALL {
-                                            ui.selectable_value(
-                                                &mut self.language,
-                                                choice,
-                                                choice.name(),
-                                            );
-                                        }
-                                    });
+                        centered(ui, 600., |ui| match page.tab {
+                            SettingsTab::General => {
+                                settings_group(ui, language.text("通用"), |ui| {
+                                    ui.label(language.text("界面语言"));
+                                    egui::ComboBox::from_id_salt("interface language")
+                                        .width(160.)
+                                        .selected_text(self.language.name())
+                                        .show_ui(ui, |ui| {
+                                            for choice in Language::ALL {
+                                                ui.selectable_value(
+                                                    &mut self.language,
+                                                    choice,
+                                                    choice.name(),
+                                                );
+                                            }
+                                        });
+                                    ui.add_space(12.);
+                                    ui.label(language.text("外观"));
+                                    egui::ComboBox::from_id_salt("appearance")
+                                        .width(160.)
+                                        .selected_text(language.text(self.appearance.label()))
+                                        .show_ui(ui, |ui| {
+                                            for choice in Appearance::ALL {
+                                                ui.selectable_value(
+                                                    &mut self.appearance,
+                                                    choice,
+                                                    language.text(choice.label()),
+                                                );
+                                            }
+                                        });
+                                    ui.label(RichText::new(language.text(
+                                        "跟随当前设备的系统外观，切换后立即生效。",
+                                    )).color(palette.muted).size(12.));
+                                });
+                            }
+                            SettingsTab::Session => {
+                                settings_group(ui, language.text("会话"), |ui| {
+                                    ui.label(language.text("回复期间的发送方式"));
+                                    let help = language.text(
+                                        "加入队列会在当前回复结束后发送。引导会话会把消息送入正在回复的当前轮。",
+                                    );
+                                    ui.label(RichText::new(help).color(palette.muted));
+                                    ui.add_space(8.);
+                                    egui::ComboBox::from_id_salt("send-mode")
+                                        .width(160.)
+                                        .selected_text(language.text(self.send_mode.label()))
+                                        .show_ui(ui, |ui| {
+                                            for mode in [SendMode::Queue, SendMode::Steer] {
+                                                ui.selectable_value(
+                                                    &mut self.send_mode,
+                                                    mode,
+                                                    language.text(mode.label()),
+                                                );
+                                            }
+                                        });
+                                });
+                            }
+                            SettingsTab::Cli => {
+                                settings_group(ui, language.text("CLI 路径"), |ui| {
+                                    save_paths = cli_path_settings(ui, page, language);
+                                });
                                 ui.add_space(12.);
-                                ui.label(language.text("外观"));
-                                egui::ComboBox::from_id_salt("appearance")
-                                    .width(160.)
-                                    .selected_text(language.text(self.appearance.label()))
-                                    .show_ui(ui, |ui| {
-                                        for choice in Appearance::ALL {
-                                            ui.selectable_value(
-                                                &mut self.appearance,
-                                                choice,
-                                                language.text(choice.label()),
-                                            );
-                                        }
-                                    });
-                                ui.label(RichText::new(language.text(
-                                    "跟随当前设备的系统外观，切换后立即生效。",
-                                )).color(palette.muted).size(12.));
-                            });
-                            ui.add_space(12.);
-                            settings_group(ui, language.text("会话"), |ui| {
-                                ui.label(language.text("回复期间的发送方式"));
-                                let help = language.text(
-                                    "加入队列会在当前回复结束后发送。引导会话会把消息送入正在回复的当前轮。",
-                                );
-                                ui.label(RichText::new(help).color(palette.muted));
-                                ui.add_space(8.);
-                                egui::ComboBox::from_id_salt("send-mode")
-                                    .width(160.)
-                                    .selected_text(language.text(self.send_mode.label()))
-                                    .show_ui(ui, |ui| {
-                                        for mode in [SendMode::Queue, SendMode::Steer] {
-                                            ui.selectable_value(
-                                                &mut self.send_mode,
-                                                mode,
-                                                language.text(mode.label()),
-                                            );
-                                        }
-                                    });
-                            });
-                            ui.add_space(12.);
-                            settings_group(ui, language.text("网络"), |ui| {
-                                save = proxy_settings(ui, page, language);
-                            });
+                                settings_group(ui, language.text("网络"), |ui| {
+                                    save = proxy_settings(ui, page, language);
+                                });
+                            }
+                            SettingsTab::Updates => {
+                                settings_group(ui, language.text("软件更新"), |ui| {
+                                    restart = self.updates.show(ui, language);
+                                });
+                            }
                         });
                         ui.add_space(24.);
                     });
@@ -3067,6 +3354,10 @@ impl Desktop {
         }
         if back {
             self.settings_page = None;
+        } else if restart {
+            self.restart_for_update(ctx);
+        } else if save_paths {
+            self.save_cli_path_settings(ctx);
         } else if save {
             self.save_proxy_settings(ctx);
         }
@@ -3276,9 +3567,7 @@ impl Desktop {
         }) else {
             ui.horizontal(|ui| {
                 ui.add(egui::Spinner::new().size(14.).color(palette.accent));
-                ui.label(
-                    RichText::new(language.text("正在读取 Token 用量…")).color(palette.muted),
-                );
+                ui.label(RichText::new(language.text("正在读取 Token 用量…")).color(palette.muted));
             });
             return;
         };
@@ -3974,11 +4263,7 @@ fn usage_section_tabs(ui: &mut Ui, showing_account_quota: &mut bool) -> bool {
     changed
 }
 
-fn segmented_bar<T: Copy + PartialEq>(
-    ui: &mut Ui,
-    current: T,
-    items: &[(T, &str)],
-) -> Option<T> {
+fn segmented_bar<T: Copy + PartialEq>(ui: &mut Ui, current: T, items: &[(T, &str)]) -> Option<T> {
     let palette = Palette::of(ui);
     let mut selected_next = None;
     egui::Frame::new()
@@ -4258,16 +4543,23 @@ fn render_stacked_share_bar(
         } else {
             (x + w).min(track.right())
         };
-        let seg_rect = Rect::from_min_max(egui::pos2(x, track.top()), egui::pos2(right, track.bottom()));
+        let seg_rect = Rect::from_min_max(
+            egui::pos2(x, track.top()),
+            egui::pos2(right, track.bottom()),
+        );
         let color = provider_accent(ui, palette, *provider);
         ui.painter().rect_filled(seg_rect, height / 2., color);
         let share = format_share(*count, grand_total).unwrap_or_default();
-        ui.interact(seg_rect, ui.id().with(("share_seg", index)), egui::Sense::hover())
-            .on_hover_text(format!(
-                "{} · {} Tokens ({share})",
-                provider.label(),
-                group_tokens(*count)
-            ));
+        ui.interact(
+            seg_rect,
+            ui.id().with(("share_seg", index)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(format!(
+            "{} · {} Tokens ({share})",
+            provider.label(),
+            group_tokens(*count)
+        ));
         x = right + gap;
     }
 }
@@ -4320,67 +4612,62 @@ fn render_provider_usage_row(
     let count = provider.counts.map(TokenCounts::total);
     let share = count.and_then(|value| format_share(value, grand_total));
 
-    egui::Sides::new()
-        .height(22.)
-        .shrink_left()
-        .show(
-            ui,
-            |ui| {
-                ui.spacing_mut().item_spacing.x = 7.;
-                let (dot, _) = ui.allocate_exact_size(vec2(8., 8.), egui::Sense::hover());
-                let dot_color = if count.is_some_and(|value| value > 0) {
-                    accent
-                } else {
-                    palette.line
-                };
-                ui.painter().circle_filled(dot.center(), 4., dot_color);
-                ui.label(RichText::new(provider.provider.label()).size(13.5).strong());
-            },
-            |ui| {
-                if let Some(value) = count {
-                    let hover = format!("{} Tokens", group_tokens(value));
-                    ui.spacing_mut().item_spacing.x = 5.;
-                    ui.label(RichText::new("Tokens").size(11.5).color(palette.muted))
-                        .on_hover_text(&hover);
-                    let value_color = if value == 0 {
-                        palette.muted
-                    } else {
-                        palette.ink
-                    };
-                    ui.label(
-                        RichText::new(format_token_count(value))
-                            .size(14.)
-                            .color(value_color)
-                            .strong(),
-                    )
+    egui::Sides::new().height(22.).shrink_left().show(
+        ui,
+        |ui| {
+            ui.spacing_mut().item_spacing.x = 7.;
+            let (dot, _) = ui.allocate_exact_size(vec2(8., 8.), egui::Sense::hover());
+            let dot_color = if count.is_some_and(|value| value > 0) {
+                accent
+            } else {
+                palette.line
+            };
+            ui.painter().circle_filled(dot.center(), 4., dot_color);
+            ui.label(RichText::new(provider.provider.label()).size(13.5).strong());
+        },
+        |ui| {
+            if let Some(value) = count {
+                let hover = format!("{} Tokens", group_tokens(value));
+                ui.spacing_mut().item_spacing.x = 5.;
+                ui.label(RichText::new("Tokens").size(11.5).color(palette.muted))
                     .on_hover_text(&hover);
-                    if let Some(share) = &share {
-                        ui.add_space(2.);
-                        let galley = ui.fonts_mut(|fonts| {
-                            fonts.layout_no_wrap(
-                                share.clone(),
-                                FontId::proportional(11.),
-                                palette.muted,
-                            )
-                        });
-                        let (chip, _) = ui.allocate_exact_size(
-                            galley.size() + vec2(10., 4.),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter()
-                            .rect_filled(chip, chip.height() / 2., palette.soft);
-                        ui.painter()
-                            .galley(chip.center() - galley.size() / 2., galley, palette.muted);
-                    }
+                let value_color = if value == 0 {
+                    palette.muted
                 } else {
-                    ui.label(
-                        RichText::new(language.text("暂无 Token 记录。"))
-                            .size(12.)
-                            .color(palette.muted),
-                    );
+                    palette.ink
+                };
+                ui.label(
+                    RichText::new(format_token_count(value))
+                        .size(14.)
+                        .color(value_color)
+                        .strong(),
+                )
+                .on_hover_text(&hover);
+                if let Some(share) = &share {
+                    ui.add_space(2.);
+                    let galley = ui.fonts_mut(|fonts| {
+                        fonts.layout_no_wrap(
+                            share.clone(),
+                            FontId::proportional(11.),
+                            palette.muted,
+                        )
+                    });
+                    let (chip, _) =
+                        ui.allocate_exact_size(galley.size() + vec2(10., 4.), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(chip, chip.height() / 2., palette.soft);
+                    ui.painter()
+                        .galley(chip.center() - galley.size() / 2., galley, palette.muted);
                 }
-            },
-        );
+            } else {
+                ui.label(
+                    RichText::new(language.text("暂无 Token 记录。"))
+                        .size(12.)
+                        .color(palette.muted),
+                );
+            }
+        },
+    );
 
     if let Some(counts) = provider.counts {
         let value = counts.total();
@@ -4518,6 +4805,73 @@ fn settings_group(ui: &mut Ui, label: &str, content: impl FnOnce(&mut Ui)) {
         ui.add_space(5.);
         content(ui);
     });
+}
+
+fn cli_path_settings(ui: &mut Ui, page: &mut SettingsPage, language: Language) -> bool {
+    let palette = Palette::of(ui);
+    for provider in Provider::ALL {
+        ui.push_id(provider, |ui| {
+            ui.label(provider.label());
+            let path = page.cli_paths.entry(provider).or_default();
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let browse = ui.button(language.text("选择文件…"));
+                let input = egui::Frame::new()
+                    .fill(palette.canvas)
+                    .stroke(Stroke::new(1., palette.line))
+                    .corner_radius(6)
+                    .inner_margin(Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        input::text_edit(
+                            ui,
+                            TextEdit::singleline(path)
+                                .desired_width(f32::INFINITY)
+                                .frame(false)
+                                .hint_text(language.text("自动查找")),
+                            false,
+                        )
+                    })
+                    .inner;
+                if input.changed() {
+                    page.cli_path_result = None;
+                }
+                if browse.clicked()
+                    && let Some(file) = rfd::FileDialog::new()
+                        .set_title(language.text("选择 CLI 可执行文件"))
+                        .pick_file()
+                {
+                    if let Some(file) = file.to_str() {
+                        *path = file.to_owned();
+                        page.cli_path_result = None;
+                    } else {
+                        page.cli_path_result = Some(Err(crate::settings::CliPathError {
+                            provider: Some(provider),
+                            message: "无法读取此文件名，请选择其他 CLI 文件。".into(),
+                        }));
+                    }
+                }
+            });
+            ui.add_space(6.);
+        });
+    }
+    ui.horizontal_wrapped(|ui| {
+        let save = ui.button(language.text("保存 CLI 路径")).clicked();
+        match &page.cli_path_result {
+            Some(Ok(())) => {
+                ui.colored_label(palette.accent, language.text("已保存 CLI 路径。"));
+            }
+            Some(Err(error)) => {
+                let message = language.text(&error.message);
+                if let Some(provider) = error.provider {
+                    ui.colored_label(palette.warn, format!("{} · {message}", provider.label()));
+                } else {
+                    ui.colored_label(palette.warn, message);
+                }
+            }
+            None => {}
+        }
+        save
+    })
+    .inner
 }
 
 fn proxy_settings(ui: &mut Ui, page: &mut SettingsPage, language: Language) -> bool {
@@ -5009,28 +5363,56 @@ mod native_restoration_tests {
                 setup(&ctx);
                 ctx.set_theme(theme);
                 language.apply(&ctx);
-                let _ = ctx.run(egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(760., 548.))),
-                    ..Default::default()
-                }, |ctx| {
-                    window_header(ctx, "compact native header test", 20, Layout::right_to_left(Align::Center), |ui| {
-                        let button = Icon::More.button(ui, language.text("会话操作"), Palette::of(ui).muted);
-                        assert!(button.rect.width() <= 38.);
-                        assert!(button.rect.height() < TITLE_BAR_HEIGHT);
-                        assert!(ui.max_rect().contains_rect(button.rect));
-                    });
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        ui.allocate_ui_with_layout(vec2(204., 0.), Layout::top_down(Align::Min), |ui| {
-                            ui.set_width(204.);
-                            for label in ["上下文用量", "重命名", "创建分支", "目标", "文件回退", "扩展状态"] {
-                                let start = ui.cursor().min;
-                                action_menu_row(ui, label);
-                                assert!(ui.min_rect().width() <= 205., "{}: {label}", language.code());
-                                assert!(ui.cursor().min.y >= start.y + 30.);
-                            }
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(760., 548.))),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        window_header(
+                            ctx,
+                            "compact native header test",
+                            20,
+                            Layout::right_to_left(Align::Center),
+                            |ui| {
+                                let button = Icon::More.button(
+                                    ui,
+                                    language.text("会话操作"),
+                                    Palette::of(ui).muted,
+                                );
+                                assert!(button.rect.width() <= 38.);
+                                assert!(button.rect.height() < TITLE_BAR_HEIGHT);
+                                assert!(ui.max_rect().contains_rect(button.rect));
+                            },
+                        );
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            ui.allocate_ui_with_layout(
+                                vec2(204., 0.),
+                                Layout::top_down(Align::Min),
+                                |ui| {
+                                    ui.set_width(204.);
+                                    for label in [
+                                        "上下文用量",
+                                        "重命名",
+                                        "创建分支",
+                                        "目标",
+                                        "文件回退",
+                                        "扩展状态",
+                                    ] {
+                                        let start = ui.cursor().min;
+                                        action_menu_row(ui, label);
+                                        assert!(
+                                            ui.min_rect().width() <= 205.,
+                                            "{}: {label}",
+                                            language.code()
+                                        );
+                                        assert!(ui.cursor().min.y >= start.y + 30.);
+                                    }
+                                },
+                            );
                         });
-                    });
-                });
+                    },
+                );
             }
         }
     }
@@ -5077,7 +5459,11 @@ mod native_restoration_tests {
             _ => None,
         });
         assert!(labels.clone().any(|label| label == "Used · 0"));
-        assert!(labels.clone().any(|label| label == "Limit · Not reported by engine"));
+        assert!(
+            labels
+                .clone()
+                .any(|label| label == "Limit · Not reported by engine")
+        );
     }
 }
 
@@ -5740,8 +6126,8 @@ mod quota_tests {
                             usage_section_tabs(ui, &mut account);
                             showing_account.set(account);
                             ui.add_space(10.);
-                            let periods = UsagePeriod::ALL
-                                .map(|item| (item, language.text(item.label())));
+                            let periods =
+                                UsagePeriod::ALL.map(|item| (item, language.text(item.label())));
                             if let Some(next) = segmented_bar(ui, period.get(), &periods) {
                                 period.set(next);
                             }
@@ -6333,7 +6719,9 @@ fn wide_markdown_table_does_not_expand_chat_or_prevent_scrolling() {
                             .show(ui, |ui| {
                                 centered(ui, COLUMN, |ui| {
                                     ui.add_space(400.);
-                                    for (index, text) in [&reply, &paragraph].into_iter().enumerate() {
+                                    for (index, text) in
+                                        [&reply, &paragraph].into_iter().enumerate()
+                                    {
                                         ui.push_id(("message", index), |ui| {
                                             render_reply(
                                                 ui,
@@ -6374,16 +6762,19 @@ fn wide_markdown_table_does_not_expand_chat_or_prevent_scrolling() {
     assert_eq!(paragraphs, 2);
 
     let table_cell = |output: &egui::FullOutput| {
-        output.shapes.iter().find_map(|clipped| {
-            if let egui::Shape::Text(text) = &clipped.shape
-                && text.galley.text() == cell.trim_end()
-            {
-                Some((text.pos, clipped.clip_rect))
-            } else {
-                None
-            }
-        })
-        .expect("the long table cell should be rendered")
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| {
+                if let egui::Shape::Text(text) = &clipped.shape
+                    && text.galley.text() == cell.trim_end()
+                {
+                    Some((text.pos, clipped.clip_rect))
+                } else {
+                    None
+                }
+            })
+            .expect("the long table cell should be rendered")
     };
     let (table_origin, table_clip) = table_cell(&output);
     let pointer = table_origin + vec2(15., 8.);
@@ -6648,26 +7039,14 @@ fn render_file_change(ui: &mut Ui, file: &FileChange) {
                         .max_height(220.)
                         .min_scrolled_height(220.)
                         .show(ui, |ui| {
-                            let mut diff = egui::text::LayoutJob::default();
-                            for line in file.diff.split_inclusive('\n') {
-                                let color = if ["+++ ", "--- ", "@@", "diff ", "index ", "*** "]
-                                    .iter()
-                                    .any(|prefix| line.starts_with(prefix))
-                                {
-                                    palette.muted
-                                } else if line.starts_with('+') {
-                                    palette.added
-                                } else if line.starts_with('-') {
-                                    palette.danger
-                                } else {
-                                    palette.ink
-                                };
-                                diff.append(
-                                    line,
-                                    0.,
-                                    egui::TextFormat::simple(FontId::monospace(12.5), color),
-                                );
-                            }
+                            let diff = super::syntax::highlight_diff_job(
+                                ui.ctx(),
+                                &file.diff,
+                                &file.path,
+                                12.5,
+                                18.5,
+                                ui.visuals().dark_mode,
+                            );
                             ui.add(Label::new(diff).wrap().selectable(true));
                             if file.truncated {
                                 ui.label(

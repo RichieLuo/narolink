@@ -49,11 +49,7 @@ pub(crate) fn read_file(path: &Path) -> LoadResult {
     {
         return Err("此文件是二进制文件，暂不支持预览。");
     }
-    let syntax = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
+    let syntax = crate::syntax::detect_syntax_from_path(path);
     let markdown = matches!(
         syntax.as_str(),
         "md" | "markdown" | "mdown" | "mkd" | "mkdn"

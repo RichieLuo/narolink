@@ -1,11 +1,11 @@
 use super::{
     Language,
     style::{Icon, Palette, surface},
+    syntax,
 };
 use crate::file_preview::local_file;
 use eframe::egui::{self, Align, Label, Layout, Margin, RichText, Stroke, Ui, vec2};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
-use egui_extras::syntax_highlighting::{self, CodeTheme};
 use pulldown_cmark::{Alignment, CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd};
 use std::{
     borrow::Cow,
@@ -196,6 +196,12 @@ fn render_markdown(
             show_markdown(ui, cache, &markdown, viewer, remote);
         }
     });
+    super::chat_menu::publish_hovered_file(
+        ui.ctx(),
+        local_files
+            .iter()
+            .map(|(target, path)| (target.as_ref(), path.as_path())),
+    );
     local_files
         .into_iter()
         .enumerate()
@@ -212,27 +218,165 @@ fn show_markdown(
     viewer: CommonMarkViewer<'_>,
     remote: bool,
 ) {
-    if !remote {
-        viewer.show(ui, cache, source);
-        return;
+    let source = if remote {
+        let text = image_alt_text(source, cache);
+        // Rewriting alt text can change how neighboring Markdown is parsed.
+        if let Cow::Owned(text) = &text {
+            for event in Parser::new_ext(text, parser_options()) {
+                match event {
+                    Event::Start(Tag::Image { .. }) => {
+                        ui.label(text);
+                        return;
+                    }
+                    Event::Start(Tag::Link { dest_url, .. }) if !web_link(&dest_url) => {
+                        cache.add_link_hook(dest_url.as_ref());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        text
+    } else {
+        Cow::Borrowed(source)
+    };
+    let wrapped = guard_indented_wrap(&source);
+    viewer.show(ui, cache, &wrapped);
+}
+
+/// Work around an upstream epaint 0.33 line-breaking bug where `first_row_indentation`
+/// is not cleared after wrapping row 0, causing a later row with a long unspaced non-CJK
+/// run to shift left by `-first_row_indentation` (negative X) outside the chat column.
+/// Encoding break characters as HTML numeric character references splits them into
+/// separate `pulldown_cmark` text events while decoding back to the exact original text.
+fn guard_indented_wrap(source: &str) -> Cow<'_, str> {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+    let mut skip_depth = 0usize;
+
+    for (event, range) in Parser::new_ext(source, parser_options()).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_) | Tag::Link { .. } | Tag::Image { .. }) => {
+                skip_depth += 1;
+            }
+            Event::End(TagEnd::CodeBlock | TagEnd::Link | TagEnd::Image) => {
+                skip_depth = skip_depth.saturating_sub(1);
+            }
+            Event::Text(_) if skip_depth == 0 => {
+                let raw = &source[range.clone()];
+                if let Some(rewritten) = split_unspaced_markdown_text(raw) {
+                    if out.is_empty() {
+                        out.reserve(source.len() + 64);
+                    }
+                    out.push_str(&source[cursor..range.start]);
+                    out.push_str(&rewritten);
+                    cursor = range.end;
+                }
+            }
+            _ => {}
+        }
     }
-    let text = image_alt_text(source, cache);
-    // Rewriting alt text can change how neighboring Markdown is parsed.
-    if let Cow::Owned(text) = &text {
-        for event in Parser::new_ext(text, parser_options()) {
-            match event {
-                Event::Start(Tag::Image { .. }) => {
-                    ui.label(text);
-                    return;
-                }
-                Event::Start(Tag::Link { dest_url, .. }) if !web_link(&dest_url) => {
-                    cache.add_link_hook(dest_url.as_ref());
-                }
-                _ => {}
+
+    if cursor == 0 {
+        Cow::Borrowed(source)
+    } else {
+        out.push_str(&source[cursor..]);
+        Cow::Owned(out)
+    }
+}
+
+fn is_epaint_cjk(c: char) -> bool {
+    ('\u{4E00}'..='\u{9FFF}').contains(&c)
+        || ('\u{3400}'..='\u{4DBF}').contains(&c)
+        || ('\u{2B740}'..='\u{2B81F}').contains(&c)
+        || ('\u{3040}'..='\u{30FF}').contains(&c)
+}
+
+fn is_cjk_break_punct(c: char) -> bool {
+    matches!(
+        c,
+        '、' | '，' | '。' | '；' | '：' | '！' | '？' | '）' | '】' | '》' | '」' | '』' | '·'
+    )
+}
+
+fn split_unspaced_markdown_text(raw: &str) -> Option<String> {
+    // Fast check: only rewrite if the slice has a run of >= 16 non-whitespace non-CJK chars
+    // or CJK punctuation adjacent to non-CJK text.
+    let mut needs_rewrite = false;
+    let mut run = 0usize;
+    for ch in raw.chars() {
+        if (ch.is_whitespace() && ch != '\u{A0}') || is_epaint_cjk(ch) {
+            run = 0;
+        } else {
+            run += 1;
+            if run >= 16 {
+                needs_rewrite = true;
+                break;
             }
         }
     }
-    viewer.show(ui, cache, &text);
+    if !needs_rewrite {
+        return None;
+    }
+
+    let mut out = String::with_capacity(raw.len() + 32);
+    let mut run = 0usize;
+    let mut changed = false;
+    let mut prev_backslash = false;
+    let mut in_entity = false;
+
+    for ch in raw.chars() {
+        if prev_backslash {
+            prev_backslash = false;
+            out.push(ch);
+            run += 1;
+            continue;
+        }
+        if ch == '\\' {
+            prev_backslash = true;
+            out.push(ch);
+            run += 1;
+            continue;
+        }
+        if in_entity {
+            out.push(ch);
+            if ch == ';' || !ch.is_ascii_alphanumeric() && ch != '#' {
+                in_entity = false;
+            }
+            run += 1;
+            continue;
+        }
+        if ch == '&' {
+            in_entity = true;
+            out.push(ch);
+            run += 1;
+            continue;
+        }
+
+        if (ch.is_whitespace() && ch != '\u{A0}') || is_epaint_cjk(ch) {
+            out.push(ch);
+            run = 0;
+            continue;
+        }
+
+        let should_split = (is_cjk_break_punct(ch) && run >= 1)
+            || (run >= 10
+                && matches!(
+                    ch,
+                    '/' | '-' | '_' | '.' | ',' | ';' | ':' | '?' | '=' | '+'
+                ))
+            || (run >= 18 && ch.is_ascii_alphanumeric());
+
+        if should_split {
+            let _ = write!(out, "&#x{:x};", ch as u32);
+            run = 0;
+            changed = true;
+        } else {
+            out.push(ch);
+            run += 1;
+        }
+    }
+
+    changed.then_some(out)
 }
 
 fn image_alt_text<'a>(source: &'a str, cache: &mut CommonMarkCache) -> Cow<'a, str> {
@@ -390,16 +534,44 @@ fn code_language(info: &str) -> (&str, &str) {
         "bash" => ("sh", "Bash"),
         "sh" | "shell" => ("sh", "Shell"),
         "zsh" => ("sh", "Zsh"),
+        "fish" => ("sh", "Fish"),
+        "ps1" | "powershell" => ("sh", "PowerShell"),
         "rs" | "rust" => ("rs", "Rust"),
-        "js" | "javascript" => ("js", "JavaScript"),
-        "ts" | "typescript" => ("ts", "TypeScript"),
+        "js" | "mjs" | "cjs" | "javascript" => ("js", "JavaScript"),
+        "jsx" => ("jsx", "JSX"),
+        "ts" | "mts" | "cts" | "typescript" => ("ts", "TypeScript"),
+        "tsx" => ("tsx", "TSX"),
         "py" | "python" => ("py", "Python"),
         "go" | "golang" => ("go", "Go"),
-        "json" => ("json", "JSON"),
+        "c" => ("c", "C"),
+        "cpp" | "cc" | "cxx" | "c++" | "hpp" => ("cpp", "C++"),
+        "java" => ("java", "Java"),
+        "kt" | "kotlin" => ("kt", "Kotlin"),
+        "swift" => ("swift", "Swift"),
+        "cs" | "csharp" | "c#" => ("cs", "C#"),
+        "rb" | "ruby" => ("rb", "Ruby"),
+        "php" => ("php", "PHP"),
+        "lua" => ("lua", "Lua"),
+        "zig" => ("zig", "Zig"),
+        "dart" => ("dart", "Dart"),
+        "json" | "jsonc" | "json5" => ("json", "JSON"),
         "yaml" | "yml" => ("yml", "YAML"),
+        "toml" => ("toml", "TOML"),
+        "ini" | "cfg" | "conf" | "env" => ("ini", "INI"),
         "sql" => ("sql", "SQL"),
-        "html" => ("html", "HTML"),
+        "html" | "htm" => ("html", "HTML"),
+        "xml" | "svg" => ("xml", "XML"),
+        "vue" => ("vue", "Vue"),
+        "svelte" => ("svelte", "Svelte"),
         "css" => ("css", "CSS"),
+        "scss" | "sass" => ("scss", "SCSS"),
+        "less" => ("less", "Less"),
+        "md" | "markdown" => ("md", "Markdown"),
+        "dockerfile" | "docker" => ("dockerfile", "Dockerfile"),
+        "makefile" | "make" => ("makefile", "Makefile"),
+        "proto" | "protobuf" => ("proto", "Protobuf"),
+        "graphql" | "gql" => ("graphql", "GraphQL"),
+        "diff" | "patch" => ("diff", "Diff"),
         "" | "text" | "txt" | "plaintext" => ("", "纯文本"),
         _ => (language, language),
     };
@@ -462,18 +634,14 @@ fn render_code_block(ui: &mut Ui, block: &CodeBlock) {
                 egui::ScrollArea::horizontal()
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
-                        let theme = CodeTheme::from_style(ui.style());
-                        let mut job = syntax_highlighting::highlight(
+                        let job = syntax::highlight_job(
                             ui.ctx(),
-                            ui.style(),
-                            &theme,
                             content,
                             syntax,
+                            13.,
+                            20.,
+                            ui.visuals().dark_mode,
                         );
-                        for section in &mut job.sections {
-                            section.format.line_height = Some(20.);
-                            section.format.underline = Stroke::NONE;
-                        }
                         ui.add(Label::new(job).extend().selectable(true));
                     });
             });
@@ -838,5 +1006,75 @@ print(1)
         assert_eq!(local_file("javascript:alert(1)", cwd), None);
         assert_eq!(local_file("file://another-host/project/main.rs", cwd), None);
         assert_eq!(local_file("//another-host/project/main.rs", cwd), None);
+    }
+
+    #[test]
+    fn long_unspaced_list_after_inline_links_stays_inside_column() {
+        let documents = [
+            "- **统一语法分词器**（[src/syntax.rs](file:///tmp/src/syntax.rs)、[src/file_preview.rs](file:///tmp/src/file_preview.rs)）：支持 Rust、TypeScript/TSX、JavaScript/JSX/MJS、Python、Go、C/C++、Java、Kotlin、Swift、C#、Ruby、PHP、Lua、Zig、Dart、Shell/PowerShell、SQL、HTML/XML/Vue/Svelte（含内嵌 `<script>`/`<style>`）、CSS/SCSS/Less、JSON/JSONC、YAML、TOML、INI/ENV、Markdown、Dockerfile、Makefile、Protobuf、GraphQL、Diff 等常见语言。\n",
+            "- **参考路径**（[README.md](file:///tmp/README.md)）：说明 very_long_unspaced_identifier_segment_one/segment_two/segment_three/segment_four/segment_five/segment_six/segment_seven。\n",
+        ];
+        let column_left = 260.0;
+        for document in documents {
+            for column_width in [560.0, 400.0, 320.0] {
+                let ctx = egui::Context::default();
+                super::super::style::setup(&ctx);
+                ctx.set_theme(egui::Theme::Light);
+                let mut cache = CommonMarkCache::default();
+                let output = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            vec2(1200., 800.),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            ui.scope_builder(
+                                egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                                    egui::pos2(column_left, 20.),
+                                    vec2(column_width, 700.),
+                                )),
+                                |ui| {
+                                    render(ui, &mut cache, document, Path::new("/tmp"));
+                                },
+                            );
+                        });
+                    },
+                );
+                let mut combined = String::new();
+                for shape in &output.shapes {
+                    if let egui::Shape::Text(text) = &shape.shape {
+                        combined.push_str(text.galley.text());
+                        for row in &text.galley.rows {
+                            for glyph in &row.glyphs {
+                                let gx = text.pos.x + row.pos.x + glyph.pos.x;
+                                assert!(
+                                    gx >= column_left - 2.0,
+                                    "glyph {:?} escaped left of column ({gx} < {column_left}) at width {column_width} in {:?}",
+                                    glyph.chr,
+                                    text.galley.text()
+                                );
+                                assert!(
+                                    gx + glyph.advance_width <= column_left + column_width + 8.0,
+                                    "glyph {:?} escaped right of column ({} > {}) at width {column_width} in {:?}",
+                                    glyph.chr,
+                                    gx + glyph.advance_width,
+                                    column_left + column_width,
+                                    text.galley.text()
+                                );
+                            }
+                        }
+                    }
+                }
+                if document.contains("TypeScript") {
+                    assert!(combined.contains("Rust、TypeScript/TSX、JavaScript/JSX/MJS"));
+                    assert!(combined.contains("Shell/PowerShell"));
+                } else {
+                    assert!(combined.contains("segment_one/segment_two/segment_three"));
+                }
+            }
+        }
     }
 }

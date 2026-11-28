@@ -1,8 +1,10 @@
 use crate::engine::attachments::{
     ImageAttachment, LocalAttachment, MAX_IMAGE_ATTACHMENTS, validate_image_attachments,
 };
+mod chat_menu;
 mod files;
 mod git;
+mod git_diff;
 mod i18n;
 mod input;
 #[cfg(target_os = "macos")]
@@ -10,8 +12,10 @@ mod macos;
 mod markdown;
 mod remote;
 mod style;
+mod syntax;
 mod thumbnails;
 mod ui;
+mod updates;
 mod workspace;
 
 use crate::{
@@ -21,7 +25,8 @@ use crate::{
         usage::{UsagePeriod, UsageReport},
     },
     service::{Activity, PermissionTarget, RunSummary, SendMode, Service, Snapshot, Status},
-    settings::STATE_APP_ID,
+    settings::{self, CliPathError, CliPaths, STATE_APP_ID},
+    update,
     web::Gateway,
 };
 use eframe::egui;
@@ -29,15 +34,17 @@ use i18n::Language;
 use remote::RemoteClient;
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     rc::Rc,
     sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
+use updates::DesktopUpdates;
 use workspace::Workspace;
 
-pub fn run(service: Service, gateway: Gateway) -> eframe::Result {
+pub fn run(service: Service, gateway: Gateway, startup: update::Startup) -> eframe::Result {
     let logo = image::load_from_memory(include_bytes!("../public/icons/192.png"))
         .expect("bundled Naro logo")
         .into_rgba8();
@@ -72,6 +79,8 @@ pub fn run(service: Service, gateway: Gateway) -> eframe::Result {
         winit::event_loop::EventLoop::<eframe::UserEvent>::with_user_event().build()?;
     let clipboard = Rc::new(input::ComposerClipboard::default());
     let app_clipboard = clipboard.clone();
+    let restart = Rc::new(Cell::new(None));
+    let app_restart = restart.clone();
     let app = eframe::create_native(
         "Naro",
         eframe::NativeOptions {
@@ -87,9 +96,21 @@ pub fn run(service: Service, gateway: Gateway) -> eframe::Result {
             let brand = cc
                 .egui_ctx
                 .load_texture("narolink", brand, Default::default());
-            let mut app = Desktop::new(service, gateway, cc, brand, app_clipboard);
+            let mut app = Desktop::new(
+                service,
+                gateway,
+                cc,
+                brand,
+                app_clipboard,
+                DesktopUpdates::new(startup.failed),
+                app_restart,
+            );
+            if startup.failed {
+                app.open_settings();
+            }
             app.refresh_inventory(&cc.egui_ctx, false);
             app.load_models(&cc.egui_ctx, Provider::Codex, false);
+            startup.ready();
             Ok(Box::new(app))
         }),
         &event_loop,
@@ -97,6 +118,11 @@ pub fn run(service: Service, gateway: Gateway) -> eframe::Result {
     event_loop.run_app(&mut input::NativeApp::new(app, clipboard.clone()))?;
     if !clipboard.initialized() {
         return Err(eframe::Error::AppCreation("无法打开 Naro 窗口".into()));
+    }
+    if let Some(restart) = restart.take() {
+        restart
+            .commit()
+            .map_err(|error| eframe::Error::AppCreation(error.into()))?;
     }
     Ok(())
 }
@@ -191,6 +217,8 @@ struct Desktop {
     relay_token: String,
     relay_note: Option<String>,
     settings_page: Option<SettingsPage>,
+    updates: DesktopUpdates,
+    restart: Rc<Cell<Option<update::Restart>>>,
     note: Option<String>,
     markdown: egui_commonmark::CommonMarkCache,
     files: files::FileViewer,
@@ -231,8 +259,11 @@ struct CodexQuotaReset {
 
 #[derive(Default)]
 struct SettingsPage {
+    tab: ui::SettingsTab,
     proxy_address: String,
     proxy_result: Option<Result<(), String>>,
+    cli_paths: CliPaths,
+    cli_path_result: Option<Result<(), CliPathError>>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -291,7 +322,8 @@ struct NativeRequest {
 
 impl NativeRequest {
     fn is_current(&self, view: &View, epoch: u64) -> bool {
-        epoch == self.epoch && view.provider == self.session.provider
+        epoch == self.epoch
+            && view.provider == self.session.provider
             && view.id.as_deref() == Some(self.session.id.as_str())
     }
 }
@@ -307,13 +339,31 @@ struct ActionDialog {
 }
 
 enum ActionBody {
-    Rename { name: String },
-    Goal { objective: String, budget: String, loaded: bool },
-    Review { branch_mode: bool, branch: String },
-    Rewind { selected: Option<String>, preview: Option<(String, serde_json::Value)> },
+    Rename {
+        name: String,
+    },
+    Goal {
+        objective: String,
+        budget: String,
+        loaded: bool,
+    },
+    Review {
+        branch_mode: bool,
+        branch: String,
+    },
+    Rewind {
+        selected: Option<String>,
+        preview: Option<(String, serde_json::Value)>,
+    },
     Context,
-    Extensions { result: Option<serde_json::Value>, full: bool },
-    Confirm { label: &'static str, action: engine::SessionAction },
+    Extensions {
+        result: Option<serde_json::Value>,
+        full: bool,
+    },
+    Confirm {
+        label: &'static str,
+        action: engine::SessionAction,
+    },
 }
 
 impl ActionBody {
@@ -396,15 +446,26 @@ impl View {
     }
 
     fn latest_context(&self) -> Option<&engine::work::ContextUsage> {
-        self.context_report.as_ref().or_else(|| {
-            self.snapshot.as_ref().and_then(|snapshot| {
-                snapshot.follow_ups.iter().rev()
-                    .filter(|entry| entry.delivery == crate::service::Delivery::Sent)
-                    .find_map(|entry| entry.work.context.as_ref())
-                    .or(snapshot.work.context.as_ref())
+        self.context_report
+            .as_ref()
+            .or_else(|| {
+                self.snapshot.as_ref().and_then(|snapshot| {
+                    snapshot
+                        .follow_ups
+                        .iter()
+                        .rev()
+                        .filter(|entry| entry.delivery == crate::service::Delivery::Sent)
+                        .find_map(|entry| entry.work.context.as_ref())
+                        .or(snapshot.work.context.as_ref())
+                })
             })
-        }).or_else(|| self.transcript.messages.iter().rev()
-            .find_map(|message| message.work.context.as_ref()))
+            .or_else(|| {
+                self.transcript
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|message| message.work.context.as_ref())
+            })
     }
 
     fn is_new(&self) -> bool {
@@ -479,6 +540,8 @@ impl Desktop {
         cc: &eframe::CreationContext<'_>,
         brand: egui::TextureHandle,
         clipboard: Rc<input::ComposerClipboard>,
+        updates: DesktopUpdates,
+        restart: Rc<Cell<Option<update::Restart>>>,
     ) -> Self {
         let (outbox, inbox) = mpsc::channel();
         let relay_url = cc
@@ -570,6 +633,8 @@ impl Desktop {
             relay_token: String::new(),
             relay_note: None,
             settings_page: None,
+            updates,
+            restart,
             note: None,
             markdown: Default::default(),
             files: Default::default(),
@@ -783,10 +848,19 @@ impl Desktop {
 
     fn open_settings(&mut self) {
         let mut page = SettingsPage::default();
-        match crate::settings::cli_proxy() {
+        match settings::cli_proxy() {
             Ok(Some(proxy)) => page.proxy_address = proxy.to_string(),
             Ok(None) => {}
             Err(error) => page.proxy_result = Some(Err(error)),
+        }
+        match settings::cli_paths() {
+            Ok(paths) => page.cli_paths = paths,
+            Err(message) => {
+                page.cli_path_result = Some(Err(CliPathError {
+                    provider: None,
+                    message,
+                }));
+            }
         }
         self.settings_page = Some(page);
     }
@@ -795,13 +869,29 @@ impl Desktop {
         let Some(page) = &mut self.settings_page else {
             return;
         };
-        let result = crate::settings::save_cli_proxy(&page.proxy_address);
+        let result = settings::save_cli_proxy(&page.proxy_address);
         let saved = result.is_ok();
         page.proxy_result = Some(result);
         if saved {
-            self.service.invalidate_cli_catalogs();
+            self.refresh_cli_settings(ctx);
         }
-        if saved && self.remote.is_none() {
+    }
+
+    fn save_cli_path_settings(&mut self, ctx: &egui::Context) {
+        let Some(page) = &mut self.settings_page else {
+            return;
+        };
+        let result = settings::save_cli_paths(&mut page.cli_paths);
+        let saved = result.is_ok();
+        page.cli_path_result = Some(result);
+        if saved {
+            self.refresh_cli_settings(ctx);
+        }
+    }
+
+    fn refresh_cli_settings(&mut self, ctx: &egui::Context) {
+        self.service.invalidate_cli_catalogs();
+        if self.remote.is_none() {
             self.catalog_epoch += 1;
             self.inventory_pending.clear();
             self.model_pending.clear();
@@ -1181,14 +1271,18 @@ impl Desktop {
             session_id: self.view.id.clone(),
             project_id: self.view.project_id.clone(),
             additional_directories: self
-                .view.startup.additional_directories
+                .view
+                .startup
+                .additional_directories
                 .lines()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from)
                 .collect(),
             context_files: self
-                .view.startup.context_files
+                .view
+                .startup
+                .context_files
                 .lines()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -1320,12 +1414,15 @@ impl Desktop {
 
     fn native_pending(&self) -> bool {
         self.view.id.as_ref().is_some_and(|id| {
-            self.action_pending.contains_key(&(self.view.provider, id.clone()))
+            self.action_pending
+                .contains_key(&(self.view.provider, id.clone()))
         })
     }
 
     fn open_action(&mut self, body: ActionBody) {
-        let Some(session) = self.view.session.clone() else { return };
+        let Some(session) = self.view.session.clone() else {
+            return;
+        };
         self.action_serial += 1;
         self.action_dialog = Some(ActionDialog {
             id: self.action_serial,
@@ -1339,9 +1436,15 @@ impl Desktop {
     }
 
     fn request_native_action(&mut self, ctx: &egui::Context, action: engine::SessionAction) {
-        if self.view.busy() || self.native_pending() { return; }
-        let Some(dialog) = &mut self.action_dialog else { return };
-        if dialog.pending || dialog.epoch != self.epoch { return; }
+        if self.view.busy() || self.native_pending() {
+            return;
+        }
+        let Some(dialog) = &mut self.action_dialog else {
+            return;
+        };
+        if dialog.pending || dialog.epoch != self.epoch {
+            return;
+        }
         self.action_serial += 1;
         let request = NativeRequest {
             serial: self.action_serial,
@@ -1353,7 +1456,10 @@ impl Desktop {
         dialog.pending = true;
         dialog.error = None;
         dialog.status = None;
-        self.action_pending.insert((request.session.provider, request.session.id.clone()), request.serial);
+        self.action_pending.insert(
+            (request.session.provider, request.session.id.clone()),
+            request.serial,
+        );
         self.background(ctx, move |service| {
             let result = service.session_action(&request.session, &request.action);
             Update::NativeAction(request, result)
@@ -1368,14 +1474,26 @@ impl Desktop {
     ) {
         use engine::SessionAction as A;
         let key = (request.session.provider, request.session.id.clone());
-        if self.action_pending.get(&key) != Some(&request.serial) { return; }
+        if self.action_pending.get(&key) != Some(&request.serial) {
+            return;
+        }
         self.action_pending.remove(&key);
         let current = request.is_current(&self.view, self.epoch);
-        let visible = current && self.action_dialog.as_ref().is_some_and(|dialog| {
-            dialog.id == request.dialog && dialog.epoch == request.epoch
-        });
-        let mutation = matches!(request.action, A::Rename { .. } | A::Fork | A::Archive
-            | A::Unarchive | A::GoalSet { .. } | A::GoalClear | A::CheckpointRewind { .. });
+        let visible = current
+            && self
+                .action_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.id == request.dialog && dialog.epoch == request.epoch);
+        let mutation = matches!(
+            request.action,
+            A::Rename { .. }
+                | A::Fork
+                | A::Archive
+                | A::Unarchive
+                | A::GoalSet { .. }
+                | A::GoalClear
+                | A::CheckpointRewind { .. }
+        );
         if mutation && result.is_ok() {
             self.refresh_inventory(ctx, true);
         }
@@ -1383,20 +1501,26 @@ impl Desktop {
             match &request.action {
                 A::Rename { name } => {
                     if let Some(Ok(inventory)) = self.inventories.get_mut(&request.session.provider)
-                        && let Some(session) = inventory.sessions.iter_mut().find(|row| row.id == request.session.id)
+                        && let Some(session) = inventory
+                            .sessions
+                            .iter_mut()
+                            .find(|row| row.id == request.session.id)
                     {
                         session.title = name.clone();
                     }
                     if current {
                         self.view.title = Some(name.clone());
-                        if let Some(session) = &mut self.view.session { session.title = name.clone(); }
+                        if let Some(session) = &mut self.view.session {
+                            session.title = name.clone();
+                        }
                     }
                 }
                 A::Fork if current => {
                     if let Some(id) = value["session_id"].as_str() {
                         let mut session = request.session.clone();
                         session.id = id.into();
-                        session.title = format!("{} ({})", session.title, self.language.text("创建分支"));
+                        session.title =
+                            format!("{} ({})", session.title, self.language.text("创建分支"));
                         self.action_dialog = None;
                         self.open(ctx, session);
                         self.restore_composer_focus = true;
@@ -1413,7 +1537,9 @@ impl Desktop {
                 _ => {}
             }
         }
-        if !visible { return; }
+        if !visible {
+            return;
+        }
         let dialog = self.action_dialog.as_mut().unwrap();
         dialog.pending = false;
         match result {
@@ -1421,26 +1547,53 @@ impl Desktop {
             Ok(value) => {
                 dialog.status = Some("操作完成");
                 match (&mut dialog.body, request.action) {
-                    (ActionBody::Goal { objective, budget, loaded }, A::GoalGet) => {
-                        *objective = value["goal"]["objective"].as_str().unwrap_or_default().into();
-                        *budget = value["goal"]["tokenBudget"].as_u64().map(|n| n.to_string()).unwrap_or_default();
+                    (
+                        ActionBody::Goal {
+                            objective,
+                            budget,
+                            loaded,
+                        },
+                        A::GoalGet,
+                    ) => {
+                        *objective = value["goal"]["objective"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .into();
+                        *budget = value["goal"]["tokenBudget"]
+                            .as_u64()
+                            .map(|n| n.to_string())
+                            .unwrap_or_default();
                         *loaded = true;
                         dialog.status = None;
                     }
-                    (ActionBody::Goal { objective, budget, .. }, A::GoalClear) => {
+                    (
+                        ActionBody::Goal {
+                            objective, budget, ..
+                        },
+                        A::GoalClear,
+                    ) => {
                         objective.clear();
                         budget.clear();
                     }
                     (ActionBody::Context, A::Context) => {
-                        self.view.context_report = Some(engine::work::ContextUsage::new(value["totalTokens"].as_u64(), value["maxTokens"].as_u64()));
+                        self.view.context_report = Some(engine::work::ContextUsage::new(
+                            value["totalTokens"].as_u64(),
+                            value["maxTokens"].as_u64(),
+                        ));
                         dialog.status = None;
                     }
-                    (ActionBody::Rewind { selected, preview }, A::CheckpointPreview { message_id })
-                        if selected.as_deref() == Some(&message_id) => {
+                    (
+                        ActionBody::Rewind { selected, preview },
+                        A::CheckpointPreview { message_id },
+                    ) if selected.as_deref() == Some(&message_id) => {
                         *preview = (value["canRewind"] == true).then_some((message_id, value));
-                        dialog.status = preview.is_none().then_some("引擎未确认可回退，未执行文件更改。");
+                        dialog.status = preview
+                            .is_none()
+                            .then_some("引擎未确认可回退，未执行文件更改。");
                     }
-                    (ActionBody::Rewind { preview, .. }, A::CheckpointRewind { .. }) => *preview = None,
+                    (ActionBody::Rewind { preview, .. }, A::CheckpointRewind { .. }) => {
+                        *preview = None
+                    }
                     (ActionBody::Extensions { result, .. }, A::Extensions | A::McpStatus) => {
                         *result = Some(value);
                         dialog.status = None;
@@ -1574,12 +1727,16 @@ impl Desktop {
                 Update::NativeSearch(serial, result) if serial == self.native_search.serial => {
                     self.native_search.pending = false;
                     match result {
-                        Ok(value) => self.native_search.hits =
-                            value["data"].as_array().cloned().unwrap_or_default(),
+                        Ok(value) => {
+                            self.native_search.hits =
+                                value["data"].as_array().cloned().unwrap_or_default()
+                        }
                         Err(error) => self.native_search.error = Some(error),
                     }
                 }
-                Update::NativeAction(request, result) => self.finish_native_action(ctx, request, result),
+                Update::NativeAction(request, result) => {
+                    self.finish_native_action(ctx, request, result)
+                }
                 Update::TokenUsage(report) => {
                     self.token_usage_pending = false;
                     match report {
@@ -1769,6 +1926,7 @@ impl Desktop {
 impl eframe::App for Desktop {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        self.updates.poll(ctx);
         if ctx.input(|input| input.events.contains(&egui::Event::WindowFocused(true))) {
             self.load_models(ctx, self.view.provider, false);
         }
@@ -1806,14 +1964,24 @@ mod tests {
             dialog: 3,
             epoch: 8,
             session: Session {
-                provider: Provider::Codex, id: "origin".into(), title: "Original".into(),
-                named: true, cwd: PathBuf::from("/workspace"), project_id: None, model: None,
-                updated: 0, preview: None, rollout: None,
+                provider: Provider::Codex,
+                id: "origin".into(),
+                title: "Original".into(),
+                named: true,
+                cwd: PathBuf::from("/workspace"),
+                project_id: None,
+                model: None,
+                updated: 0,
+                preview: None,
+                rollout: None,
             },
             action: engine::SessionAction::Fork,
         };
         assert!(request.is_current(&view, 8));
-        assert!(!request.is_current(&view, 9), "returning to origin is a different view");
+        assert!(
+            !request.is_current(&view, 9),
+            "returning to origin is a different view"
+        );
         view.id = Some("other".into());
         assert!(!request.is_current(&view, 8));
         view.id = Some("origin".into());
@@ -1827,10 +1995,16 @@ mod tests {
         view.draft = "original".into();
         view.startup.agent = "original-agent".into();
         view.startup.additional_directories = "/first".into();
-        let replacement = StartupDraft { agent: "replacement-agent".into(), ..Default::default() };
+        let replacement = StartupDraft {
+            agent: "replacement-agent".into(),
+            ..Default::default()
+        };
         view.show_draft(ComposerDraft {
-            text: "replacement".into(), images: Vec::new(), local_files: Vec::new(),
-            startup: replacement.clone(), withdrawn: false,
+            text: "replacement".into(),
+            images: Vec::new(),
+            local_files: Vec::new(),
+            startup: replacement.clone(),
+            withdrawn: false,
         });
         assert_eq!(view.startup, replacement);
         let previous = view.other_drafts.pop_front().unwrap();
@@ -1840,7 +2014,11 @@ mod tests {
         assert_eq!(view.startup.agent, "original-agent");
         view.clear_startup_settings();
         assert_eq!(view.startup, StartupDraft::default());
-        assert!(view.other_drafts.iter().all(|draft| draft.startup == StartupDraft::default()));
+        assert!(
+            view.other_drafts
+                .iter()
+                .all(|draft| draft.startup == StartupDraft::default())
+        );
         assert_eq!(View::new(Provider::Claude).startup, StartupDraft::default());
         assert_eq!(View::new(Provider::Codex).startup, StartupDraft::default());
     }
@@ -1853,10 +2031,18 @@ mod tests {
         old.work.context = Some(engine::work::ContextUsage::new(Some(10), Some(100)));
         let mut recent = engine::Message::new(engine::Role::Assistant, "recent".into());
         recent.work.context = Some(engine::work::ContextUsage::new(Some(30), Some(100)));
-        view.transcript.messages = vec![old, recent, engine::Message::new(engine::Role::User, "next".into())];
+        view.transcript.messages = vec![
+            old,
+            recent,
+            engine::Message::new(engine::Role::User, "next".into()),
+        ];
         assert_eq!(view.latest_context().unwrap().used, Some(30));
         view.context_report = Some(engine::work::ContextUsage::default());
-        assert_eq!(view.latest_context().unwrap().used, None, "new unknown report must not reuse older numbers");
+        assert_eq!(
+            view.latest_context().unwrap().used,
+            None,
+            "new unknown report must not reuse older numbers"
+        );
     }
 
     #[test]

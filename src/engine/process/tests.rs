@@ -102,6 +102,7 @@ fn npm_codex_and_explicit_js_start_with_a_system_only_parent_path() {
             ])
             .env(PROBE, "1")
             .env("HOME", &directory.0)
+            .env("NAROLINK_STATE_DIR", directory.0.join("state"))
             .env("PATH", SYSTEM_PATH)
             .env_remove("NAROLINK_CODEX_CLI");
         if explicit {
@@ -115,4 +116,68 @@ fn npm_codex_and_explicit_js_start_with_a_system_only_parent_path() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn saved_cli_path_overrides_the_environment_and_can_be_cleared() {
+    use crate::settings::{CliPaths, cli_paths, save_cli_paths};
+    use std::os::unix::fs::PermissionsExt;
+
+    const PROBE: &str = "NAROLINK_TEST_SAVED_CLI_PATH";
+    if let Some(directory) = std::env::var_os(PROBE).map(PathBuf::from) {
+        let script = directory.join("custom cli/codex.mjs");
+        let mut paths = CliPaths::from([(Provider::Codex, format!("\"{}\"", script.display()))]);
+        assert!(save_cli_paths(&mut paths).is_ok());
+        assert_eq!(paths[&Provider::Codex], script.to_str().unwrap());
+        assert_eq!(cli_paths().unwrap(), paths);
+        let output = cli_command(Provider::Codex).unwrap().output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"configured-cli\n");
+
+        paths.insert(Provider::Codex, "codex".into());
+        let error = save_cli_paths(&mut paths).err().unwrap();
+        assert_eq!(error.provider, Some(Provider::Codex));
+        assert_eq!(
+            cli_paths().unwrap()[&Provider::Codex],
+            script.to_str().unwrap()
+        );
+
+        paths.clear();
+        assert!(save_cli_paths(&mut paths).is_ok());
+        let fallback = cli_command(Provider::Codex).unwrap();
+        assert_eq!(
+            fallback.get_program(),
+            directory.join("fallback-codex").as_os_str()
+        );
+        return;
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let bin = directory.path().join("custom cli");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join("codex.mjs"), b"fixture").unwrap();
+    let node = bin.join("node");
+    std::fs::write(&node, b"#!/bin/sh\nprintf 'configured-cli\\n'\n").unwrap();
+    std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "engine::process::tests::saved_cli_path_overrides_the_environment_and_can_be_cleared",
+            "--nocapture",
+        ])
+        .env(PROBE, directory.path())
+        .env("PATH", SYSTEM_PATH)
+        .env("NAROLINK_STATE_DIR", directory.path().join("state"))
+        .env(
+            "NAROLINK_CODEX_CLI",
+            directory.path().join("fallback-codex"),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
