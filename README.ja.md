@@ -4,13 +4,93 @@
 
 Codex、Claude Code、Antigravity のセッションを、PC・スマートフォン・タブレットから再開できます。Naro は接続先の PC で CLI を実行します。別の PC にある Naro デスクトップアプリや、スマートフォン・タブレットのブラウザーから接続できます。
 
-[システム構成](#システム構成) · [はじめに](#はじめに) · [Go リレーを配備する](#go-リレーを配備する) · [ソースコードの構成](#ソースコードの構成) · [ソースからのビルドとテスト](#ソースからのビルドとテスト)
+[ソースコードの構成](#ソースコードの構成) · [システム構成](#システム構成) · [はじめに](#はじめに) · [Go リレーを配備する](#go-リレーを配備する) · [ソースからのビルドとテスト](#ソースからのビルドとテスト)
+
+## ソースコードの構成
+
+デスクトップアプリ、リレー、ブラウザー版、製品サイトはそれぞれ専用のディレクトリにあります。
+
+```text
+naro-link/
+├── desktop/            # Rust デスクトップアプリとローカル API
+│   ├── Cargo.toml      # Cargo のマニフェスト
+│   ├── Cargo.lock      # Rust 依存関係の固定バージョン
+│   ├── build.rs        # Windows リソースのビルドスクリプト
+│   ├── src/            # 画面、タスクサービス、CLI アダプター
+│   ├── assets/         # アイコン、フォント、更新用公開鍵
+│   ├── vendor/         # 修正済みの Rust の依存ライブラリ
+│   ├── scripts/        # パッケージ化・インストール・署名
+│   └── tests/          # 実際の CLI を使う検証
+├── relay/              # Go リレーサーバー
+│   ├── go.mod          # Go モジュールの設定
+│   ├── relay.go        # リレーの起動と端末別ルーティング
+│   ├── relay_ws.go     # WebSocket 接続と転送
+│   ├── relay_stream.go # ストリーミング経路とタイムアウト
+│   ├── relay_test.go   # リレーの単体テスト
+│   ├── Dockerfile      # リレーイメージのビルド
+│   ├── compose.yml     # リレーコンテナーの設定
+│   └── scripts/        # リレーの配備
+├── web/                # 共有のブラウザー版
+│   ├── public/         # HTML・CSS・JavaScript・アイコン
+│   ├── embed.go        # リレーへのブラウザー版の組み込み
+│   ├── go.mod          # ブラウザー資産を組み込む Go モジュール
+│   └── tests/          # ブラウザー画面の回帰テスト
+├── site/               # 製品紹介・ダウンロードサイト
+├── tests/              # デスクトップ版とリレーの統合テスト・モック CLI
+└── docs/               # 構成図と検証記録
+```
+
+デスクトップ版とリレーはそれぞれ `web/public/` を実行ファイルに組み込みます。Docker ではリレーコンテナーがブラウザー版も配信します。デスクトップ版の配布物は `desktop/dist/`、リレーの実行ファイルは `relay/dist/` に出力します。
+
+### `desktop/src/` の中身
+
+Rust では同じ名前のファイルとディレクトリでモジュールを構成できます。たとえば `web.rs` が `web` モジュール本体で、`web/` にサブモジュールが入ります。`web.rs` の `mod remote;` は `web/remote.rs`、その中の `mod ws;` は `web/remote/ws.rs` に対応します。以下は主なファイルです。
+
+```text
+desktop/src/
+├── main.rs             # デスクトップアプリの起動入口
+├── desktop.rs          # デスクトップアプリ本体と画面の状態
+├── desktop/            # デスクトップ画面のサブモジュール
+│   ├── ui.rs           # 画面のレイアウトと操作
+│   ├── workspace.rs    # ローカル・リモート操作の振り分け
+│   ├── remote.rs       # 別の PC にアクセスするクライアント
+│   ├── file_tree.rs    # デスクトップ版のファイルツリー
+│   └── git.rs          # デスクトップ版の Git パネル
+├── web.rs              # ローカル HTTP サーバーと API ルート
+├── web/                # HTTP サーバーのサブモジュール
+│   ├── auth.rs         # ペアリングと認証
+│   ├── stream.rs       # SSE によるタスク更新の配信
+│   ├── remote.rs       # 接続先 PC からリレーへの接続
+│   └── remote/         # remote モジュールのサブディレクトリ
+│       └── ws.rs       # リレー接続の WebSocket 実装
+├── service.rs          # デスクトップ版と Web 版が共有するセッション・タスク・キュー
+├── service/            # 権限やタイトルなどを扱うタスクサービスのサブモジュール
+├── engine.rs           # 共通の型定義と CLI ごとの振り分け
+├── engine/             # 各 CLI のアダプターと共通ツール
+│   ├── codex.rs        # Codex アダプター
+│   ├── claude.rs       # Claude Code アダプター
+│   ├── antigravity.rs  # Antigravity アダプター
+│   └── process.rs      # CLI 実行ファイルの検出とプロセス起動
+├── file_preview.rs     # プレビュー用のテキストファイルの読み込み
+├── git.rs              # 画面と API が共用する Git 操作
+├── settings.rs         # ローカルデータの場所、CLI パス、プロキシ設定
+├── syntax.rs           # デスクトップ版と Web 版に共通の構文強調
+├── update.rs           # デスクトップ版の更新確認・ダウンロード
+└── update/             # デスクトップ版の更新インストール
+```
+
+### ソースコードの入口
+
+- **デスクトップアプリ** · [main.rs](desktop/src/main.rs) · [desktop.rs](desktop/src/desktop.rs) · [web.rs](desktop/src/web.rs) · [service.rs](desktop/src/service.rs) · [engine/](desktop/src/engine/)
+- **リレー** · [relay.go](relay/relay.go) · [compose.yml](relay/compose.yml)
+- **ブラウザー版** · [index.html](web/public/index.html) · [app.js](web/public/app.js)
+- **統合テスト** · [e2e.mjs](tests/e2e.mjs) · [mock-cli.mjs](tests/mock-cli.mjs)
 
 ## システム構成
 
 **セッションは作業ディレクトリがある PC で実行します。** この接続先 PC で Naro とログイン済みの CLI が動作します。同じ PC ではデスクトップ画面やブラウザーから直接操作できます。スマートフォンや別の PC からは Go リレーを経由して同じ PC に接続します。
 
-![Naro のシステム構成。別の端末は Go リレーと WSS を経由して接続先 PC のローカル API にアクセスします。同じ PC のブラウザーもこの API を使います。API とデスクトップ画面は共通のタスクサービスを使い、アダプター経由でローカルの CLI を呼び出します。作業ファイルと CLI の会話履歴は接続先 PC にあります。](assets/readme/architecture.ja.png)
+![Naro のシステム構成。別の端末は Go リレーと WSS を経由して接続先 PC のローカル API にアクセスします。同じ PC のブラウザーもこの API を使います。API とデスクトップ画面は共通のタスクサービスを使い、アダプター経由でローカルの CLI を呼び出します。作業ファイルと CLI の会話履歴は接続先 PC にあります。](docs/images/architecture.ja.png)
 
 ### 接続先 PC の内部構成
 
@@ -44,7 +124,7 @@ Codex、Claude Code、Antigravity のセッションを、PC・スマートフ�
 
 **Naro の Go リレーはユーザーデータを永続化しません。** メッセージ、添付ファイル、ファイルのプレビュー、ペアリング記録はいずれもリレーのディスクに保存されず、メモリ上でのみ転送されます。会話履歴は接続先 PC 上の各 CLI が管理し、プロジェクトのファイルも接続先 PC の作業ディレクトリから読み込みます。
 
-![Naro の中継の流れ。接続先 PC が単一の WSS 接続を確立して待機中はハートビートのみを送信し、Go リレーがメモリ上で HTTPS リクエストと SSE 応答を多重転送します。](assets/readme/relay.ja.png)
+![Naro の中継の流れ。接続先 PC が単一の WSS 接続を確立して待機中はハートビートのみを送信し、Go リレーがメモリ上で HTTPS リクエストと SSE 応答を多重転送します。](docs/images/relay.ja.png)
 
 接続先 PC は受信用ポートを公開せず、Go リレーへ **1 本の WSS 接続**を能動的に確立し、待機中はハートビートのみを送受信します。リレーはその 1 本の接続上でリクエスト ID ごとに通常リクエスト・チャンク応答・逐次応答を並行転送するため、逐次応答中でも停止・承認・追加メッセージを即座に処理できます。ブラウザーや別の PC のデスクトップアプリは HTTPS API を使います。ブラウザーは SSE で逐次応答を受け取ります。ペアリングコードは接続先 PC が検証し、認証情報は接続元の端末が保持します。リレーはデバイスルーティング・デバイス名・オンライン状態のみをメモリに保持し、転送完了・タイムアウト・切断時に待機中のリクエストを速やかに解放します。切断やリレー再起動後はランダムジッター付きバックオフで自動再接続し、送信済みリクエストを自動で再実行しません。
 
@@ -52,22 +132,24 @@ Codex、Claude Code、Antigravity のセッションを、PC・スマートフ�
 
 ## Go リレーを配備する
 
-Go 1.23 以降でリレーをビルドします。サーバー上で公開 HTTPS アドレスと接続トークンを設定します。以下の例では OpenSSL でランダムなトークンを生成します。例のドメインをお使いのドメインに置き換え、接続先にする各 PC に同じトークンを設定してください。リレーの再起動後も再接続できるよう、サービスの環境設定にトークンを保持します。
+以下のコマンドはリポジトリのルートから実行します。Go 1.23 以降でリレーをビルドします。サーバー上で公開 HTTPS アドレスと接続トークンを設定します。以下の例では OpenSSL でランダムなトークンを生成します。例のドメインをお使いのドメインに置き換え、接続先にする各 PC に同じトークンを設定してください。リレーの再起動後も再接続できるよう、サービスの環境設定にトークンを保持します。
 
 ```sh
-go build -trimpath -ldflags="-s -w" -o naro-relay .
+(cd relay && mkdir -p dist && go build -trimpath -ldflags="-s -w" -o dist/naro-relay .)
 export NARO_PUBLIC_URL=https://naro.example.com
 export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
-./naro-relay
+./relay/dist/naro-relay
 ```
 
-リポジトリルートの `Dockerfile` と `compose.yml` を使い、Docker で配備することもできます（既定で `127.0.0.1:7319` にバインドする読み取り専用・非 root の `naro-relay` `scratch` イメージ）：
+リレーの [Dockerfile](relay/Dockerfile) と [compose.yml](relay/compose.yml) を使い、Docker で配備することもできます（既定で `127.0.0.1:7319` にバインドする読み取り専用・非 root の `naro-relay` `scratch` イメージ）：
 
 ```sh
 export NARO_PUBLIC_URL=https://naro.example.com
 export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
-docker compose up -d --build
+docker compose -f relay/compose.yml up -d --build
 ```
+
+既存の Compose 配備では `-p <既存のプロジェクト名>` を指定すると、同じコンテナーを引き続き管理できます。
 
 | 環境変数 | 用途 |
 | --- | --- |
@@ -151,54 +233,34 @@ Codex は `app-server` 経由で既存のセッションを読み込みます。
 
 Naro は起動後にアップデートを確認します。**設定 → ソフトウェアアップデート**から手動でも確認できます。新しいバージョンをダウンロードし、タスクの完了後に再起動してインストールできます。`0.1.x` を使用している場合は、新しい起点となる `0.0.0` を一度手動でインストールしてください。[リリース手順](README.md#发布桌面更新)を参照してください。
 
-## ソースコードの構成
-
-| 確認したい機能 | 読み始めるファイル |
-| --- | --- |
-| アプリの起動 | 共有の `Service` を作成し、ローカル HTTP サーバーとデスクトップウィンドウを起動します。[`src/main.rs`](src/main.rs) |
-| デスクトップ UI とローカル設定 | ウィンドウの状態は [`src/desktop.rs`](src/desktop.rs)、egui の画面は [`src/desktop/ui.rs`](src/desktop/ui.rs) にあります。CLI パスとプロキシ設定は [`src/settings.rs`](src/settings.rs) で読み書きします。 |
-| ブラウザー版のワークスペース | [`public/`](public/) の [`index.html`](public/index.html) がページ構造、[`app.js`](public/app.js) が操作、[`style.css`](public/style.css) がスタイルを担当します。[`i18n.json`](public/i18n.json) はデスクトップ版とブラウザー版で共用します。 |
-| ローカル HTTP API | ルーティングとリクエスト処理は [`src/web.rs`](src/web.rs)、ペアリングの検証は [`src/web/auth.rs`](src/web/auth.rs)、応答のストリーミングは [`src/web/stream.rs`](src/web/stream.rs) にあります。 |
-| 両クライアントで共通のセッション・タスク処理 | セッションのキャッシュ、実行状態、キュー、実行中のターンへの指示、停止、承認は [`src/service.rs`](src/service.rs) から確認できます。 |
-| CLI ごとのセッション再開・モデル・プロトコル | [`src/engine.rs`](src/engine.rs) が共通の型を定義し、[`src/engine/`](src/engine/) の [`codex.rs`](src/engine/codex.rs)、[`claude.rs`](src/engine/claude.rs)、[`antigravity.rs`](src/engine/antigravity.rs) に処理を振り分けます。実行ファイルの検出とプロセス管理は [`process.rs`](src/engine/process.rs) にあります。 |
-| 別の端末との接続 | デスクトップアプリは [`src/desktop/workspace.rs`](src/desktop/workspace.rs) でローカルとリモートの操作を振り分け、[`src/desktop/remote.rs`](src/desktop/remote.rs) から別の PC にリクエストを送ります。接続先 PC では [`src/web/remote.rs`](src/web/remote.rs) が WSS 接続を開き、ローカル API にリクエストを渡します。リレー側のデバイスルーティングは [`relay.go`](relay.go)、WSS による転送は [`relay_ws.go`](relay_ws.go) にあります。 |
-| ワークスペースのツール | デスクトップのファイルツリーは [`src/desktop/file_tree.rs`](src/desktop/file_tree.rs)、テキストプレビュー用の読み込み処理は [`src/file_preview.rs`](src/file_preview.rs)、ローカルの Git 操作は [`src/git.rs`](src/git.rs) にあります。 |
-| 製品紹介サイト | 製品の概要とダウンロード先を掲載する独立した静的サイトです。[`site/`](site/) |
-
-`public/` は Rust のデスクトップアプリと Go リレーの両方に組み込まれます。ワークスペースを変更した場合、ローカルのブラウザー版にはデスクトップアプリのビルドで、リレー経由のブラウザー版にはリレーのビルドで反映します。
-
-### ビルド・テスト・アセット
-
-- デスクトップアプリのビルドには Cargo を使います。パッケージ名は `narolink`、配布時の名前は `Naro.app` または `Naro.exe` です。[`Cargo.toml`](Cargo.toml) · [`scripts/package-macos.sh`](scripts/package-macos.sh)
-- リポジトリルートで Go を使い、`naro-relay` をビルドします。Docker イメージには、リレーサービスとブラウザー版のワークスペースが含まれます。[`go.mod`](go.mod) · [`Dockerfile`](Dockerfile) · [`compose.yml`](compose.yml)
-- エンドツーエンドテストでは Rust のインスタンス 2 台と Go リレー 1 台を起動し、モック CLI で別端末からの操作を検証します。[`scripts/e2e.mjs`](scripts/e2e.mjs) · [`test/mock-cli.mjs`](test/mock-cli.mjs)
-- アイコン、フォント、README の画像は [`assets/`](assets/)、ローカルで修正した Rust の依存ライブラリは [`vendor/`](vendor/) にあります。Cargo のビルド出力は `target/`、配布用アーカイブは `dist/` に生成されます。
-
 ## ソースからのビルドとテスト
 
-デスクトップアプリには Rust 1.89 以降、リレーのビルドには Go 1.23 以降が必要です。エンドツーエンドテストには Node.js も必要です。
+デスクトップアプリには Rust 1.89 以降、リレーのビルドには Go 1.23 以降が必要です。エンドツーエンドテストには Node.js も必要です。以下のコマンドはリポジトリのルートから実行します。
 
 **macOS**（Xcode Command Line Tools をインストールしてから実行）
 
 ```sh
-sh scripts/package-macos.sh
-go build -o dist/narolink-relay .
-node scripts/e2e.mjs target/release/narolink dist/narolink-relay
+sh desktop/scripts/package-macos.sh
+(cd relay && mkdir -p dist && go build -o dist/naro-relay .)
+node tests/e2e.mjs desktop/target/release/narolink relay/dist/naro-relay
 ```
 
-スクリプトは `dist/Naro-<バージョン>-macOS-<アーキテクチャ>.zip` を生成します。ローカルで繰り返しインストールする場合は、`git config --local narolink.macosSigningIdentity '<コード署名用 ID>'` でキーチェーンの署名用 ID を設定すると、更新後もリムーバブルボリュームへのアクセス許可を引き継げます。環境変数 `NAROLINK_MACOS_SIGN_IDENTITY` で上書きできます。未設定の場合はアドホック署名を使用します。
+スクリプトは `desktop/dist/Naro-<バージョン>-macOS-<アーキテクチャ>.zip` を生成します。ローカルで繰り返しインストールする場合は、`git config --local narolink.macosSigningIdentity '<コード署名用 ID>'` でキーチェーンの署名用 ID を設定すると、更新後もリムーバブルボリュームへのアクセス許可を引き継げます。環境変数 `NAROLINK_MACOS_SIGN_IDENTITY` で上書きできます。未設定の場合はアドホック署名を使用します。
 
 **Windows**（MSVC ビルドツールをインストールし、Visual Studio Developer PowerShell で実行）
 
 ```powershell
-cargo build --release --locked
+cargo build --manifest-path desktop/Cargo.toml --release --locked
+New-Item -ItemType Directory -Force desktop/dist
+Copy-Item desktop/target/release/narolink.exe desktop/dist/Naro.exe
+Push-Location relay
 New-Item -ItemType Directory -Force dist
-Copy-Item target/release/narolink.exe dist/Naro.exe
-go build -o dist/narolink-relay.exe .
-node scripts/e2e.mjs dist/Naro.exe dist/narolink-relay.exe
+go build -o dist/naro-relay.exe .
+Pop-Location
+node tests/e2e.mjs desktop/dist/Naro.exe relay/dist/naro-relay.exe
 ```
 
-Rust と Go のテストは、それぞれ `cargo test --locked` と `go test ./...` で実行します。エンドツーエンドテストではモック CLI を使用し、Go リレー 1 台と独立した Rust インスタンス 2 台で、ペアリング、リクエストの分離、元の ID でのセッション再開、画像の送受信、モデルの切り替え、実行の停止、承認操作を確認します。
+Rust のテストは `cargo test --manifest-path desktop/Cargo.toml --locked`、Go のテストは `relay/` で `go test ./...` を実行します。エンドツーエンドテストではモック CLI を使用し、Go リレー 1 台と独立した Rust インスタンス 2 台で、ペアリング、リクエストの分離、元の ID でのセッション再開、画像の送受信、モデルの切り替え、実行の停止、承認操作を確認します。
 
 ## Web API
 
@@ -228,4 +290,4 @@ Rust と Go のテストは、それぞれ `cargo test --locked` と `go test ./
 
 ## ライセンス
 
-Naro のソースコードは [MIT ライセンス](LICENSE) で公開されています。同梱の Noto Sans CJK SC フォントは [SIL Open Font License 1.1](assets/OFL.txt) で提供されます。
+Naro のソースコードは [MIT ライセンス](LICENSE) で公開されています。同梱の Noto Sans CJK SC フォントは [SIL Open Font License 1.1](desktop/assets/OFL.txt) で提供されます。

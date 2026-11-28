@@ -4,13 +4,93 @@
 
 Pick up your Codex, Claude Code, and Antigravity sessions from a computer, phone, or tablet. Naro runs the CLI on the host computer. Connect from the Naro desktop app on another computer or from the web on a phone or tablet.
 
-[System architecture](#system-architecture) · [Get started](#get-started) · [Deploy the Go relay](#deploy-the-go-relay) · [Source layout](#source-layout) · [Build and test from source](#build-and-test-from-source)
+[Source layout](#source-layout) · [System architecture](#system-architecture) · [Get started](#get-started) · [Deploy the Go relay](#deploy-the-go-relay) · [Build and test from source](#build-and-test-from-source)
+
+## Source layout
+
+The desktop app, relay, browser workspace, and product site each have their own directory.
+
+```text
+naro-link/
+├── desktop/            # Rust desktop app and local API
+│   ├── Cargo.toml      # Cargo manifest
+│   ├── Cargo.lock      # Locked Rust dependency versions
+│   ├── build.rs        # Build script for Windows resources
+│   ├── src/            # UI, task service, and CLI adapters
+│   ├── assets/         # App icons, font, and update public key
+│   ├── vendor/         # Patched Rust dependency
+│   ├── scripts/        # Desktop packaging, install, and signing
+│   └── tests/          # Real CLI acceptance
+├── relay/              # Go relay server
+│   ├── go.mod          # Go module manifest
+│   ├── relay.go        # Relay entry point and routes
+│   ├── relay_ws.go     # WebSocket connections and forwarding
+│   ├── relay_stream.go # Streaming routes and timeout
+│   ├── relay_test.go   # Relay unit tests
+│   ├── Dockerfile      # Relay image build
+│   ├── compose.yml     # Relay container configuration
+│   └── scripts/        # Relay deployment
+├── web/                # Shared browser workspace
+│   ├── public/         # HTML, CSS, JavaScript, and icons
+│   ├── embed.go        # Embeds the workspace for the relay
+│   ├── go.mod          # Go module for embedding browser assets
+│   └── tests/          # Browser UI regression tests
+├── site/               # Product and download site
+├── tests/              # Desktop and relay integration tests, mock CLI
+└── docs/               # Architecture images and acceptance records
+```
+
+Both the desktop app and relay embed `web/public/` in their binaries. For Docker deployments, the relay container also serves the browser workspace. Desktop packages go in `desktop/dist/`, and relay binaries go in `relay/dist/`.
+
+### Inside `desktop/src/`
+
+Rust can organize a module as a file with a matching folder. For example, `web.rs` defines the `web` module and `web/` contains its children. The `mod remote;` declaration in `web.rs` leads to `web/remote.rs`, whose `mod ws;` leads to `web/remote/ws.rs`. The tree shows commonly used files.
+
+```text
+desktop/src/
+├── main.rs             # Desktop app entry point
+├── desktop.rs          # Desktop app and UI state
+├── desktop/            # Desktop UI submodules
+│   ├── ui.rs           # Desktop layout and interaction
+│   ├── workspace.rs    # Dispatches local and remote operations
+│   ├── remote.rs       # Desktop client for another computer
+│   ├── file_tree.rs    # Desktop workspace file tree
+│   └── git.rs          # Desktop Git panel
+├── web.rs              # Local HTTP server and API routes
+├── web/                # HTTP server submodules
+│   ├── auth.rs         # Pairing and authentication
+│   ├── stream.rs       # Streams task updates via SSE
+│   ├── remote.rs       # Host connection to the relay
+│   └── remote/         # Subdirectory of the remote module
+│       └── ws.rs       # WebSocket transport for the relay connection
+├── service.rs          # Sessions, tasks, and queues shared by desktop and web
+├── service/            # Task service submodules for permissions and titles
+├── engine.rs           # Shared types and CLI dispatch
+├── engine/             # CLI adapters and their shared tools
+│   ├── codex.rs        # Codex adapter
+│   ├── claude.rs       # Claude Code adapter
+│   ├── antigravity.rs  # Antigravity adapter
+│   └── process.rs      # Finds and launches CLI processes
+├── file_preview.rs     # Reads text files for preview
+├── git.rs              # Git operations shared by the UI and API
+├── settings.rs         # Data location, CLI paths, and proxy settings
+├── syntax.rs           # Syntax highlighting for desktop and web
+├── update.rs           # Desktop update checks and downloads
+└── update/             # Desktop update installation
+```
+
+### Source entry points
+
+- **Desktop app** · [main.rs](desktop/src/main.rs) · [desktop.rs](desktop/src/desktop.rs) · [web.rs](desktop/src/web.rs) · [service.rs](desktop/src/service.rs) · [engine/](desktop/src/engine/)
+- **Relay** · [relay.go](relay/relay.go) · [compose.yml](relay/compose.yml)
+- **Browser workspace** · [index.html](web/public/index.html) · [app.js](web/public/app.js)
+- **Integration tests** · [e2e.mjs](tests/e2e.mjs) · [mock-cli.mjs](tests/mock-cli.mjs)
 
 ## System architecture
 
 **Each session runs on the computer that holds the workspace.** Naro and the signed-in CLI run on this host. You can use its desktop window or browser directly. Phones and other computers connect to the same host through the Go relay.
 
-![Naro system architecture. Remote devices reach the host's local API through the Go relay and WSS. The local browser connects to the same API. The API and desktop window share a task service that invokes the local CLI through adapters. Project files and CLI history live on the host.](assets/readme/architecture.en.png)
+![Naro system architecture. Remote devices reach the host's local API through the Go relay and WSS. The local browser connects to the same API. The API and desktop window share a task service that invokes the local CLI through adapters. Project files and CLI history live on the host.](docs/images/architecture.en.png)
 
 ### How the host is organized
 
@@ -44,7 +124,7 @@ To use the browser workspace on the host itself, open **Device connections → O
 
 **The Naro Go relay does not persist user data.** Messages, attachments, file previews, and pairing records are never written to disk on the relay and only pass through in memory. Each CLI manages its session history on the host, and Naro reads project files from the host's workspace.
 
-![Naro relay flow. The host opens a single outbound WSS connection and sends heartbeats when idle. The Go relay multiplexes HTTPS requests and SSE replies in memory.](assets/readme/relay.en.png)
+![Naro relay flow. The host opens a single outbound WSS connection and sends heartbeats when idle. The Go relay multiplexes HTTPS requests and SSE replies in memory.](docs/images/relay.en.png)
 
 Each host opens **one outbound WSS connection** to the Go relay with no inbound ports required, sending only heartbeats while idle. The relay multiplexes concurrent requests, chunked responses, and streamed replies over that single connection by request ID, so stop, approval, and follow-up requests stay responsive during streaming. Browsers and remote desktop clients use the HTTPS API. Browsers receive streamed replies through SSE. The host verifies the pairing code and clients keep the pairing credential. The relay keeps only in-memory device routing, names, and online status, cleaning up pending requests immediately on completion, timeout, or disconnect. After a disconnect or relay restart, the host reconnects with jittered exponential backoff without automatically re-running side-effecting requests.
 
@@ -52,22 +132,24 @@ The HTTPS reverse proxy (Nginx) in the official deployment keeps access logs tha
 
 ## Deploy the Go relay
 
-Build the relay with Go 1.23 or later. Set its public HTTPS address and connection token on the server. The example uses OpenSSL to generate a random token. Replace the example domain with your own and enter the same token on each host you want to connect. Keep the token in the relay service's environment configuration so hosts can reconnect after a restart.
+Run these commands from the repository root. Build the relay with Go 1.23 or later. Set its public HTTPS address and connection token on the server. The example uses OpenSSL to generate a random token. Replace the example domain with your own and enter the same token on each host you want to connect. Keep the token in the relay service's environment configuration so hosts can reconnect after a restart.
 
 ```sh
-go build -trimpath -ldflags="-s -w" -o naro-relay .
+(cd relay && mkdir -p dist && go build -trimpath -ldflags="-s -w" -o dist/naro-relay .)
 export NARO_PUBLIC_URL=https://naro.example.com
 export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
-./naro-relay
+./relay/dist/naro-relay
 ```
 
-You can also deploy the relay with Docker using the root `Dockerfile` and `compose.yml` (a read-only, non-root `naro-relay` `scratch` image bound to `127.0.0.1:7319` by default):
+You can also deploy the relay with Docker using the relay [Dockerfile](relay/Dockerfile) and [compose.yml](relay/compose.yml) (a read-only, non-root `naro-relay` `scratch` image bound to `127.0.0.1:7319` by default):
 
 ```sh
 export NARO_PUBLIC_URL=https://naro.example.com
 export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
-docker compose up -d --build
+docker compose -f relay/compose.yml up -d --build
 ```
+
+For an existing Compose deployment, use `-p <existing-project-name>` to manage the same containers.
 
 | Environment variable | Purpose |
 | --- | --- |
@@ -151,54 +233,34 @@ In **Settings → CLI paths** on the host desktop, paste the absolute path or pi
 
 Naro checks for updates after launch. You can also check manually under **Settings → Software update**. Download an available release and confirm the restart after your running tasks finish. Users moving from `0.1.x` need to install the new `0.0.0` baseline once. See the [release process](README.md#发布桌面更新).
 
-## Source layout
-
-| What you're looking for | Where to look |
-| --- | --- |
-| App startup | Creates the shared `Service` and starts the local HTTP server and desktop window. [`src/main.rs`](src/main.rs) |
-| Desktop UI and local settings | Window state is in [`src/desktop.rs`](src/desktop.rs), and the egui interface is in [`src/desktop/ui.rs`](src/desktop/ui.rs). CLI paths and proxy settings are read and written in [`src/settings.rs`](src/settings.rs). |
-| Browser workspace | In [`public/`](public/), [`index.html`](public/index.html) defines the page, [`app.js`](public/app.js) handles interaction, and [`style.css`](public/style.css) sets the styles. The desktop and web apps share [`i18n.json`](public/i18n.json). |
-| Local HTTP API | Routes and handlers are in [`src/web.rs`](src/web.rs), pairing validation is in [`src/web/auth.rs`](src/web/auth.rs), and response streaming is in [`src/web/stream.rs`](src/web/stream.rs). |
-| Session and task behavior shared by both clients | Start with [`src/service.rs`](src/service.rs) for session caches, run state, queuing, steering, stopping, and approvals. |
-| CLI-specific resume, models, or protocol | [`src/engine.rs`](src/engine.rs) defines shared types and dispatches to the adapters in [`src/engine/`](src/engine/), including [`codex.rs`](src/engine/codex.rs), [`claude.rs`](src/engine/claude.rs), and [`antigravity.rs`](src/engine/antigravity.rs). Executable discovery and process management are in [`process.rs`](src/engine/process.rs). |
-| Remote connections | The desktop app dispatches local and remote operations in [`src/desktop/workspace.rs`](src/desktop/workspace.rs) and sends remote requests from [`src/desktop/remote.rs`](src/desktop/remote.rs). On the host, [`src/web/remote.rs`](src/web/remote.rs) opens the WSS connection and passes requests to the local API. On the relay, [`relay.go`](relay.go) handles device routing and [`relay_ws.go`](relay_ws.go) handles WSS forwarding. |
-| Workspace tools | The desktop file tree is in [`src/desktop/file_tree.rs`](src/desktop/file_tree.rs), text preview reads are in [`src/file_preview.rs`](src/file_preview.rs), and local Git operations are in [`src/git.rs`](src/git.rs). |
-| Product website | Standalone static site with the product overview and download links. [`site/`](site/) |
-
-The Rust desktop app and Go relay both bundle `public/`. Changes to the browser workspace reach the local web app through a new desktop build and the remote web app through a new relay build.
-
-### Builds, tests, and assets
-
-- Cargo builds the desktop app from the `narolink` package. It ships as `Naro.app` or `Naro.exe`. [`Cargo.toml`](Cargo.toml) · [`scripts/package-macos.sh`](scripts/package-macos.sh)
-- Go builds `naro-relay` from the repository root. The Docker image includes the relay service and the browser workspace. [`go.mod`](go.mod) · [`Dockerfile`](Dockerfile) · [`compose.yml`](compose.yml)
-- The end-to-end test runs two Rust instances and one Go relay, using a mock CLI to verify remote workflows. [`scripts/e2e.mjs`](scripts/e2e.mjs) · [`test/mock-cli.mjs`](test/mock-cli.mjs)
-- Icons, fonts, and README illustrations live in [`assets/`](assets/). Locally patched Rust dependencies live in [`vendor/`](vendor/). Cargo writes build output to `target/`, and packaging writes archives to `dist/`.
-
 ## Build and test from source
 
-The desktop app requires Rust 1.89 or later. Building the relay requires Go 1.23 or later. The end-to-end test also requires Node.js.
+The desktop app requires Rust 1.89 or later. Building the relay requires Go 1.23 or later. The end-to-end test also requires Node.js. Run the commands below from the repository root.
 
 **macOS** (with Xcode Command Line Tools installed)
 
 ```sh
-sh scripts/package-macos.sh
-go build -o dist/narolink-relay .
-node scripts/e2e.mjs target/release/narolink dist/narolink-relay
+sh desktop/scripts/package-macos.sh
+(cd relay && mkdir -p dist && go build -o dist/naro-relay .)
+node tests/e2e.mjs desktop/target/release/narolink relay/dist/naro-relay
 ```
 
-The script writes `dist/Naro-<version>-macOS-<architecture>.zip`. For repeated local installs, set `git config --local narolink.macosSigningIdentity '<signing identity>'` to a keychain identity so macOS can retain removable-volume permission across updates. Use `NAROLINK_MACOS_SIGN_IDENTITY` to override it. Without a configured identity, the script signs ad hoc.
+The script writes `desktop/dist/Naro-<version>-macOS-<architecture>.zip`. For repeated local installs, set `git config --local narolink.macosSigningIdentity '<signing identity>'` to a keychain identity so macOS can retain removable-volume permission across updates. Use `NAROLINK_MACOS_SIGN_IDENTITY` to override it. Without a configured identity, the script signs ad hoc.
 
 **Windows** (with the MSVC build tools installed, in Visual Studio Developer PowerShell)
 
 ```powershell
-cargo build --release --locked
+cargo build --manifest-path desktop/Cargo.toml --release --locked
+New-Item -ItemType Directory -Force desktop/dist
+Copy-Item desktop/target/release/narolink.exe desktop/dist/Naro.exe
+Push-Location relay
 New-Item -ItemType Directory -Force dist
-Copy-Item target/release/narolink.exe dist/Naro.exe
-go build -o dist/narolink-relay.exe .
-node scripts/e2e.mjs dist/Naro.exe dist/narolink-relay.exe
+go build -o dist/naro-relay.exe .
+Pop-Location
+node tests/e2e.mjs desktop/dist/Naro.exe relay/dist/naro-relay.exe
 ```
 
-Run `cargo test --locked` and `go test ./...` for the Rust and Go test suites. The end-to-end test uses mock CLIs, one Go relay, and two independent Rust instances. It covers device pairing, request isolation, resuming by the original session ID, image transfer, switching models, stopping runs, and responding to approvals.
+Run `cargo test --manifest-path desktop/Cargo.toml --locked` for Rust. For Go, run `go test ./...` from `relay/`. The end-to-end test uses mock CLIs, one Go relay, and two independent Rust instances. It covers device pairing, request isolation, resuming by the original session ID, image transfer, switching models, stopping runs, and responding to approvals.
 
 ## Web API
 
@@ -228,4 +290,4 @@ Each entry in `images` has a `name` and Base64-encoded `data`. Model settings in
 
 ## License
 
-Naro's source code is available under the [MIT License](LICENSE). The bundled Noto Sans CJK SC font is available under the [SIL Open Font License 1.1](assets/OFL.txt).
+Naro's source code is available under the [MIT License](LICENSE). The bundled Noto Sans CJK SC font is available under the [SIL Open Font License 1.1](desktop/assets/OFL.txt).

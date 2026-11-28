@@ -3,18 +3,20 @@
 
   const I18N = window.NARO_I18N;
   const SNIPPETS = {
-    go: `go build -trimpath -ldflags="-s -w" -o naro-relay .
+    go: `cd relay
+mkdir -p dist
+go build -trimpath -ldflags="-s -w" -o dist/naro-relay .
 export NARO_PUBLIC_URL=https://naro.example.com
 export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
-./naro-relay`,
+./dist/naro-relay`,
 
     docker: `# Docker Compose (scratch image, read-only, non-root)
 export NARO_PUBLIC_URL=https://naro.example.com
 export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
-docker compose up -d --build
+docker compose -f relay/compose.yml up -d --build
 
 # Or run directly with Docker
-docker build -t naro-relay .
+docker build -f relay/Dockerfile -t naro-relay .
 docker run -d --name naro-relay --restart unless-stopped \\
   --read-only --cap-drop ALL --security-opt no-new-privileges \\
   -p 127.0.0.1:7319:7319 \\
@@ -23,12 +25,17 @@ docker run -d --name naro-relay --restart unless-stopped \\
   naro-relay`,
 
     build: `# macOS (Rust 1.89+ & Go 1.23+)
-sh scripts/package-macos.sh
-go build -o dist/naro-relay .
+sh desktop/scripts/package-macos.sh
+(cd relay && mkdir -p dist && go build -o dist/naro-relay .)
 
 # Windows (Visual Studio Developer PowerShell)
-cargo build --release --locked
-go build -o dist/naro-relay.exe .`
+cargo build --manifest-path desktop/Cargo.toml --release --locked
+New-Item -ItemType Directory -Force desktop/dist
+Copy-Item desktop/target/release/narolink.exe desktop/dist/Naro.exe
+Push-Location relay
+New-Item -ItemType Directory -Force dist
+go build -o dist/naro-relay.exe .
+Pop-Location`
   };
 
   const urlParams = new URLSearchParams(window.location.search);

@@ -1,3 +1,8 @@
 /target/
 /dist/
+/desktop/target/
+/desktop/dist/
+/relay/dist/
+/.local/
+.DS_Store
 *.local.json

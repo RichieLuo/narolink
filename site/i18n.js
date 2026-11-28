@@ -190,7 +190,7 @@ window.NARO_I18N = {
         perm: "CLI 权限模式",
         userMsg: "把超过 256 KiB 的 Markdown 文件降级为纯源码预览，避免大文档卡顿。",
         assistantHtml:
-          '已在 <span class="file-chip">src/file_preview.rs</span> 与 <span class="file-chip">public/app.js</span> 同步加入 256 KiB 阈值判断，保留 2 MiB 单文件读取上限与一键复制。',
+          '已在 <span class="file-chip">desktop/src/file_preview.rs</span> 与 <span class="file-chip">web/public/app.js</span> 同步加入 256 KiB 阈值判断，保留 2 MiB 单文件读取上限与一键复制。',
         phoneCmd: "cargo test --locked file_preview",
         phoneSummary: "Claude Code 完成大文件预览降级，请求运行单元测试。"
       },
@@ -202,8 +202,8 @@ window.NARO_I18N = {
         perm: "ACP 执行模式",
         userMsg: "排查 iOS Safari 添加到主屏幕后的底部安全区间距和标签页主题同步。",
         assistantHtml:
-          '已检查 <span class="file-chip">public/style.css</span> 的 <code>env(safe-area-inset-bottom)</code> 与 <span class="file-chip">public/theme.js</span> 的 <code>storage</code> 监听，同浏览器多标签页可实时同步。',
-        phoneCmd: "node scripts/theme-e2e.mjs",
+          '已检查 <span class="file-chip">web/public/style.css</span> 的 <code>env(safe-area-inset-bottom)</code> 与 <span class="file-chip">web/public/theme.js</span> 的 <code>storage</code> 监听，同浏览器多标签页可实时同步。',
+        phoneCmd: "node web/tests/theme-e2e.mjs",
         phoneSummary: "Antigravity 已更新安全区样式，准备执行主题端到端测试。"
       }
     }
@@ -400,7 +400,7 @@ window.NARO_I18N = {
         perm: "CLI permission",
         userMsg: "Fall back to source-only preview for Markdown files larger than 256 KiB.",
         assistantHtml:
-          'Added the 256 KiB guard in <span class="file-chip">src/file_preview.rs</span> and <span class="file-chip">public/app.js</span> while preserving the 2 MiB file cap and copy actions.',
+          'Added the 256 KiB guard in <span class="file-chip">desktop/src/file_preview.rs</span> and <span class="file-chip">web/public/app.js</span> while preserving the 2 MiB file cap and copy actions.',
         phoneCmd: "cargo test --locked file_preview",
         phoneSummary: "Claude Code updated Markdown fallback and asks to run unit tests."
       },
@@ -412,8 +412,8 @@ window.NARO_I18N = {
         perm: "ACP mode",
         userMsg: "Check iOS Safari standalone bottom safe-area spacing and cross-tab theme sync.",
         assistantHtml:
-          'Verified <code>env(safe-area-inset-bottom)</code> in <span class="file-chip">public/style.css</span> and the <code>storage</code> listener in <span class="file-chip">public/theme.js</span> for instant tab sync.',
-        phoneCmd: "node scripts/theme-e2e.mjs",
+          'Verified <code>env(safe-area-inset-bottom)</code> in <span class="file-chip">web/public/style.css</span> and the <code>storage</code> listener in <span class="file-chip">web/public/theme.js</span> for instant tab sync.',
+        phoneCmd: "node web/tests/theme-e2e.mjs",
         phoneSummary: "Antigravity finished safe-area adjustments and is ready for E2E checks."
       }
     }
@@ -610,7 +610,7 @@ window.NARO_I18N = {
         perm: "CLI 権限モード",
         userMsg: "256 KiB を超える Markdown ファイルはソース表示にフォールバックさせて。",
         assistantHtml:
-          '<span class="file-chip">src/file_preview.rs</span> と <span class="file-chip">public/app.js</span> に 256 KiB しきい値を追加しました。2 MiB 上限とコピー機能も維持しています。',
+          '<span class="file-chip">desktop/src/file_preview.rs</span> と <span class="file-chip">web/public/app.js</span> に 256 KiB しきい値を追加しました。2 MiB 上限とコピー機能も維持しています。',
         phoneCmd: "cargo test --locked file_preview",
         phoneSummary: "Claude Code が修正を完了し、単体テストの実行を待機しています。"
       },
@@ -622,8 +622,8 @@ window.NARO_I18N = {
         perm: "ACP 実行モード",
         userMsg: "iOS Safari のホーム画面追加時の下部セーフエリアとタブ間の外観同期を確認して。",
         assistantHtml:
-          '<span class="file-chip">public/style.css</span> の <code>env(safe-area-inset-bottom)</code> と <span class="file-chip">public/theme.js</span> の <code>storage</code> 監視を確認し、即時同期を調整しました。',
-        phoneCmd: "node scripts/theme-e2e.mjs",
+          '<span class="file-chip">web/public/style.css</span> の <code>env(safe-area-inset-bottom)</code> と <span class="file-chip">web/public/theme.js</span> の <code>storage</code> 監視を確認し、即時同期を調整しました。',
+        phoneCmd: "node web/tests/theme-e2e.mjs",
         phoneSummary: "Antigravity が調整を完了し、テーマ E2E テストの実行準備が整いました。"
       }
     }

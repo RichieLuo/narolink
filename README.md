@@ -4,13 +4,93 @@
 
 在电脑、手机和平板之间接续 Codex、Claude Code 和 Antigravity 会话。目标电脑上的 Naro 桌面端运行 CLI，其他电脑可通过 Naro 桌面端连接，手机和平板可通过网页连接。
 
-[系统架构](#系统架构) · [开始使用](#开始使用) · [部署 Go 中继](#部署-go-中继) · [源码目录](#源码目录) · [从源码构建与测试](#从源码构建与测试)
+[源码目录](#源码目录) · [系统架构](#系统架构) · [开始使用](#开始使用) · [部署 Go 中继](#部署-go-中继) · [从源码构建与测试](#从源码构建与测试)
+
+## 源码目录
+
+桌面端、中继、网页工作台和产品站各有自己的目录。
+
+```text
+naro-link/
+├── desktop/            # Rust 桌面程序和本机服务
+│   ├── Cargo.toml      # Cargo 构建入口
+│   ├── Cargo.lock      # Rust 依赖的锁定版本
+│   ├── build.rs        # Windows 应用资源的构建脚本
+│   ├── src/            # 桌面界面、任务服务和 CLI 适配
+│   ├── assets/         # 桌面图标、字体和更新公钥
+│   ├── vendor/         # 桌面端修补的 Rust 依赖
+│   ├── scripts/        # 桌面打包、安装和签名
+│   └── tests/          # 真实 CLI 验收
+├── relay/              # Go 中继服务器
+│   ├── go.mod          # Go 模块入口
+│   ├── relay.go        # 中继入口和设备路由
+│   ├── relay_ws.go     # WebSocket 连接与转发
+│   ├── relay_stream.go # 流式路由和超时
+│   ├── relay_test.go   # 中继单元测试
+│   ├── Dockerfile      # 构建中继镜像
+│   ├── compose.yml     # 启动中继容器
+│   └── scripts/        # 中继部署
+├── web/                # 共享的浏览器工作台
+│   ├── public/         # HTML、CSS、JavaScript 和图标
+│   ├── embed.go        # 中继的网页嵌入入口
+│   ├── go.mod          # 网页资源的 Go 模块
+│   └── tests/          # 网页界面回归测试
+├── site/               # 产品介绍和下载站
+├── tests/              # 桌面与中继联调、模拟 CLI
+└── docs/               # 架构插图与验收记录
+```
+
+桌面端和中继都把 `web/public/` 打包进各自的程序。Docker 部署时，中继容器同时提供网页工作台。桌面安装包写入 `desktop/dist/`，中继二进制写入 `relay/dist/`。
+
+### 展开 `desktop/src/`
+
+Rust 用同名文件和目录组织一个模块。例如 `web.rs` 是 `web` 模块的主体，`web/` 放它的子模块。`web.rs` 中的 `mod remote;` 对应 `web/remote.rs`，该文件里的 `mod ws;` 再对应 `web/remote/ws.rs`。下面展开常用文件。
+
+```text
+desktop/src/
+├── main.rs             # 桌面程序启动入口
+├── desktop.rs          # 桌面应用主体和界面状态
+├── desktop/            # 桌面界面的子模块
+│   ├── ui.rs           # 桌面界面布局与交互
+│   ├── workspace.rs    # 分发本机和远程操作
+│   ├── remote.rs       # 桌面端访问另一台电脑
+│   ├── file_tree.rs    # 桌面工作区文件树
+│   └── git.rs          # 桌面的 Git 面板
+├── web.rs              # 本机 HTTP 服务与 API 路由
+├── web/                # HTTP 服务的子模块
+│   ├── auth.rs         # 配对与访问鉴权
+│   ├── stream.rs       # 通过 SSE 返回任务更新
+│   ├── remote.rs       # 目标电脑接入中继
+│   └── remote/         # remote 模块的子目录
+│       └── ws.rs       # 中继连接的 WebSocket 实现
+├── service.rs          # 桌面和网页共用的会话、任务与队列
+├── service/            # 权限和标题等任务服务子模块
+├── engine.rs           # 定义共用类型，按 CLI 分发任务
+├── engine/             # 各 CLI 的适配代码和共用工具
+│   ├── codex.rs        # Codex 适配
+│   ├── claude.rs       # Claude Code 适配
+│   ├── antigravity.rs  # Antigravity 适配
+│   └── process.rs      # 查找并启动 CLI 进程
+├── file_preview.rs     # 读取文本文件以供预览
+├── git.rs              # 执行 Git 操作，供界面和 API 共用
+├── settings.rs         # 本机数据目录、CLI 路径和代理设置
+├── syntax.rs           # 桌面和网页共用的语法高亮
+├── update.rs           # 桌面更新检查与下载
+└── update/             # 桌面更新的安装逻辑
+```
+
+### 源码入口
+
+- **桌面端** · [main.rs](desktop/src/main.rs) · [desktop.rs](desktop/src/desktop.rs) · [web.rs](desktop/src/web.rs) · [service.rs](desktop/src/service.rs) · [engine/](desktop/src/engine/)
+- **中继** · [relay.go](relay/relay.go) · [compose.yml](relay/compose.yml)
+- **网页工作台** · [index.html](web/public/index.html) · [app.js](web/public/app.js)
+- **联调测试** · [e2e.mjs](tests/e2e.mjs) · [mock-cli.mjs](tests/mock-cli.mjs)
 
 ## 系统架构
 
 **会话在项目所在的电脑上运行。** 这台目标电脑运行 Naro 和已登录的 CLI。本机可以用桌面窗口或浏览器操作，手机和另一台电脑通过 Go 中继接入同一台目标电脑。
 
-![Naro 系统架构。外部设备经 Go 中继和 WSS 进入目标电脑的本机 API，本机浏览器也连接该 API。API 与本机桌面窗口共用任务服务，经适配层调用本机 CLI。项目文件和 CLI 会话历史在目标电脑。](assets/readme/architecture.zh-CN.png)
+![Naro 系统架构。外部设备经 Go 中继和 WSS 进入目标电脑的本机 API，本机浏览器也连接该 API。API 与本机桌面窗口共用任务服务，经适配层调用本机 CLI。项目文件和 CLI 会话历史在目标电脑。](docs/images/architecture.zh-CN.png)
 
 ### 目标电脑上的分层
 
@@ -48,7 +128,7 @@ Naro 桌面端会在启动后检查更新，也可以打开 **设置 → 软件�
 
 **Naro Go 中继不持久化用户数据。** 聊天内容、附件、文件预览和配对记录都不在中继落盘，只在内存中转发。会话历史由目标电脑上的 CLI 管理，项目文件从目标电脑的工作区读取。
 
-![Naro 中继流程。目标电脑主动建立单条 WSS 长连接并在空闲时只发心跳，Go 中继在内存中复用该连接并发转发 HTTPS 请求与 SSE 流式回复。](assets/readme/relay.zh-CN.png)
+![Naro 中继流程。目标电脑主动建立单条 WSS 长连接并在空闲时只发心跳，Go 中继在内存中复用该连接并发转发 HTTPS 请求与 SSE 流式回复。](docs/images/relay.zh-CN.png)
 
 目标电脑只需主动建立 **1 条到 Go 中继的 WSS 长连接**，无需开放入站端口，空闲时只收发心跳。中继通过请求 ID 在这条连接上并发转发请求、分片响应和流式回复，流式输出期间仍可即时处理停止、审批和后续消息。浏览器和远程桌面端使用 HTTPS API，网页通过 SSE 接收流式回复。配对码由目标电脑验证，配对凭证保存在访问端；中继仅在内存中维护设备路由、设备名和在线状态，转发结束、超时或断线后及时清理。断线或中继重启后，目标电脑使用带随机抖动的退避策略自动重连，且不会自动重复执行已发出的写操作。
 
@@ -56,22 +136,24 @@ Naro 桌面端会在启动后检查更新，也可以打开 **设置 → 软件�
 
 ## 部署 Go 中继
 
-使用 Go 1.23 或更新版本构建中继。在服务器上为中继进程设置公开 HTTPS 地址和连接密钥。下面的示例用 OpenSSL 生成随机密钥。把域名替换为自己的域名，将同一个密钥填入需要连接的目标电脑。长期运行时，在服务的环境配置中保留该密钥，以便中继重启后仍可连接。
+从仓库根目录执行以下命令。使用 Go 1.23 或更新版本构建中继。在服务器上为中继进程设置公开 HTTPS 地址和连接密钥。下面的示例用 OpenSSL 生成随机密钥。把域名替换为自己的域名，将同一个密钥填入需要连接的目标电脑。长期运行时，在服务的环境配置中保留该密钥，以便中继重启后仍可连接。
 
 ```sh
-go build -trimpath -ldflags="-s -w" -o naro-relay .
+(cd relay && mkdir -p dist && go build -trimpath -ldflags="-s -w" -o dist/naro-relay .)
 export NARO_PUBLIC_URL=https://naro.example.com
 export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
-./naro-relay
+./relay/dist/naro-relay
 ```
 
-也可以使用仓库根目录的 `Dockerfile` 和 `compose.yml` 通过 Docker 部署（基于 `scratch` 的只读非 root `naro-relay` 镜像，默认绑定 `127.0.0.1:7319`）：
+也可以使用中继目录的 [`Dockerfile`](relay/Dockerfile) 和 [`compose.yml`](relay/compose.yml) 通过 Docker 部署（基于 `scratch` 的只读非 root `naro-relay` 镜像，默认绑定 `127.0.0.1:7319`）：
 
 ```sh
 export NARO_PUBLIC_URL=https://naro.example.com
 export NARO_RELAY_TOKEN="$(openssl rand -hex 32)"
-docker compose up -d --build
+docker compose -f relay/compose.yml up -d --build
 ```
+
+已有 Compose 部署可加 `-p <原项目名>`，让新配置继续管理原来的容器。
 
 | 环境变量 | 用途 |
 | --- | --- |
@@ -151,65 +233,45 @@ Codex 使用 `app-server` 读取原会话。Claude Code 从本机 JSONL 读取�
 
 在目标电脑的 Naro 桌面端打开 **设置 → CLI 路径**，可分别为 Codex、Claude Code 和 Antigravity 粘贴可执行文件的绝对路径或用「选择文件」定位。保存后，新启动的 CLI 会优先使用设置的路径。清空某一项并保存后，Naro 会依次读取该引擎的启动环境变量（`NAROLINK_CODEX_CLI`、`NAROLINK_CLAUDE_CLI` 或 `NAROLINK_AGY_CLI`）和自动查找位置。
 
-## 源码目录
-
-| 想找的功能 | 代码入口 |
-| --- | --- |
-| 程序启动 | 创建共用的 `Service`，启动本机 HTTP 服务和桌面窗口。[`src/main.rs`](src/main.rs) |
-| 桌面界面与本机设置 | 窗口状态在 [`src/desktop.rs`](src/desktop.rs)，egui 界面在 [`src/desktop/ui.rs`](src/desktop/ui.rs)。CLI 路径和代理设置由 [`src/settings.rs`](src/settings.rs) 读写。 |
-| 浏览器工作台 | [`public/`](public/) 下的 [`index.html`](public/index.html)、[`app.js`](public/app.js) 和 [`style.css`](public/style.css) 分别负责页面结构、交互和样式。[`i18n.json`](public/i18n.json) 供桌面和网页共用。 |
-| 本机 HTTP API | 路由和请求处理在 [`src/web.rs`](src/web.rs)，设备配对校验在 [`src/web/auth.rs`](src/web/auth.rs)，流式回复在 [`src/web/stream.rs`](src/web/stream.rs)。 |
-| 两端共用的会话与任务逻辑 | 会话和历史记录的缓存、任务状态、排队、引导、停止和审批都从 [`src/service.rs`](src/service.rs) 看起。 |
-| 某个 CLI 的续聊、模型或协议 | [`src/engine.rs`](src/engine.rs) 定义通用类型并按引擎分发。[`src/engine/`](src/engine/) 下有 [`codex.rs`](src/engine/codex.rs)、[`claude.rs`](src/engine/claude.rs)、[`antigravity.rs`](src/engine/antigravity.rs) 三个适配文件。可执行文件查找和进程管理在 [`process.rs`](src/engine/process.rs)。 |
-| 跨设备连接 | 桌面端在 [`src/desktop/workspace.rs`](src/desktop/workspace.rs) 分发本机和远程操作，由 [`src/desktop/remote.rs`](src/desktop/remote.rs) 向远程设备发请求。目标电脑在 [`src/web/remote.rs`](src/web/remote.rs) 建立 WSS 连接并把请求送给本机 API。中继的设备路由和 WSS 转发分别在 [`relay.go`](relay.go) 和 [`relay_ws.go`](relay_ws.go)。 |
-| 工作区工具 | 桌面文件树在 [`src/desktop/file_tree.rs`](src/desktop/file_tree.rs)，文本预览的读取逻辑在 [`src/file_preview.rs`](src/file_preview.rs)，本机 Git 操作在 [`src/git.rs`](src/git.rs)。 |
-| 产品介绍页 | 独立的静态站点，包含产品介绍和下载入口。[`site/`](site/) |
-
-`public/` 会同时打包进 Rust 桌面端和 Go 中继。改完工作台页面后，本机网页从新版桌面程序加载，经中继访问的网页从新版中继加载。
-
-### 构建、测试与资源
-
-- 桌面端用 Cargo 构建，包名为 `narolink`。发布时使用 `Naro.app` 或 `Naro.exe`。[`Cargo.toml`](Cargo.toml) · [`scripts/package-macos.sh`](scripts/package-macos.sh)
-- 中继从仓库根目录用 Go 构建成 `naro-relay`，Docker 镜像包含中继服务和浏览器工作台。[`go.mod`](go.mod) · [`Dockerfile`](Dockerfile) · [`compose.yml`](compose.yml)
-- 端到端测试启动两个 Rust 实例和一个 Go 中继，通过模拟 CLI 验证跨设备流程。[`scripts/e2e.mjs`](scripts/e2e.mjs) · [`test/mock-cli.mjs`](test/mock-cli.mjs)
-- 图标、字体和 README 插图位于 [`assets/`](assets/)，本地修补的 Rust 依赖位于 [`vendor/`](vendor/)。`target/` 是 Cargo 的构建目录，`dist/` 存放本地打包产物。
-
 ## 从源码构建与测试
 
-桌面端需要 Rust 1.89 或更新版本。构建中继需要 Go 1.23 或更新版本。端到端测试还需要 Node.js。
+桌面端需要 Rust 1.89 或更新版本。构建中继需要 Go 1.23 或更新版本。端到端测试还需要 Node.js。以下命令从仓库根目录执行。
 
 **macOS**（安装 Xcode Command Line Tools 后执行）
 
 ```sh
-sh scripts/package-macos.sh
-go build -o dist/narolink-relay .
-node scripts/e2e.mjs target/release/narolink dist/narolink-relay
+sh desktop/scripts/package-macos.sh
+(cd relay && mkdir -p dist && go build -o dist/naro-relay .)
+node tests/e2e.mjs desktop/target/release/narolink relay/dist/naro-relay
 ```
 
-脚本生成 `dist/Naro-<版本>-macOS-<架构>.zip`。本机反复安装时，可用 `git config --local narolink.macosSigningIdentity '<签名身份>'` 为此工作区固定一个钥匙串中的签名身份，让 macOS 在后续更新时沿用可移除卷授权。也可用环境变量 `NAROLINK_MACOS_SIGN_IDENTITY` 覆盖。未设置时使用 ad hoc 签名。
+脚本生成 `desktop/dist/Naro-<版本>-macOS-<架构>.zip`。本机反复安装时，可用 `git config --local narolink.macosSigningIdentity '<签名身份>'` 为此工作区固定一个钥匙串中的签名身份，让 macOS 在后续更新时沿用可移除卷授权。也可用环境变量 `NAROLINK_MACOS_SIGN_IDENTITY` 覆盖。未设置时使用 ad hoc 签名。
 
 **Windows**（安装 MSVC 构建工具后，在 Visual Studio Developer PowerShell 中执行）
 
 ```powershell
-cargo build --release --locked
+cargo build --manifest-path desktop/Cargo.toml --release --locked
+New-Item -ItemType Directory -Force desktop/dist
+Copy-Item desktop/target/release/narolink.exe desktop/dist/Naro.exe
+Push-Location relay
 New-Item -ItemType Directory -Force dist
-Copy-Item target/release/narolink.exe dist/Naro.exe
-go build -o dist/narolink-relay.exe .
-node scripts/e2e.mjs dist/Naro.exe dist/narolink-relay.exe
+go build -o dist/naro-relay.exe .
+Pop-Location
+node tests/e2e.mjs desktop/dist/Naro.exe relay/dist/naro-relay.exe
 ```
 
-Rust 和 Go 测试分别用 `cargo test --locked` 和 `go test ./...` 运行。端到端测试用模拟 CLI 启动一个 Go 中继和两个独立的 Rust 实例，覆盖设备配对、请求隔离、原 ID 续聊、图片传输、模型切换、停止和操作确认。
+Rust 测试用 `cargo test --manifest-path desktop/Cargo.toml --locked`，Go 测试在 `relay/` 下运行 `go test ./...`。端到端测试用模拟 CLI 启动一个 Go 中继和两个独立的 Rust 实例，覆盖设备配对、请求隔离、原 ID 续聊、图片传输、模型切换、停止和操作确认。
 
 ### 发布桌面更新
 
 1. 用同一产品版本构建各平台的最终安装包。公开发行的 macOS 包可使用 `NAROLINK_MACOS_SIGN_IDENTITY` 指定 Developer ID Application，并用 `NAROLINK_MACOS_NOTARY_PROFILE` 指定 `notarytool` 的钥匙串配置，打包脚本会完成公证并附上票据。
-2. 用发布者保存在本机的 Ed25519 私钥为最终安装包生成更新清单。公钥在 `assets/update-key.txt`，私钥保存在仓库和中继之外。
+2. 用发布者保存在本机的 Ed25519 私钥为最终安装包生成更新清单。公钥在 `desktop/assets/update-key.txt`，私钥保存在仓库和中继之外。
 
    ```sh
-   node scripts/sign-update.mjs 0.0.0 "$NAROLINK_UPDATE_KEY_FILE" dist/Naro-0.0.0-macOS-arm64.zip dist/Naro.exe
+   node desktop/scripts/sign-update.mjs 0.0.0 "$NAROLINK_UPDATE_KEY_FILE" desktop/dist/Naro-0.0.0-macOS-arm64.zip desktop/dist/Naro.exe
    ```
 
-3. 将 `dist/naro-update-v1.json` 和参与签名的安装包上传到对应的 GitHub Release 草稿（例如 `v0.0.0`），保留文件名，再作为最新的正式版本发布。客户端通过 HTTPS 检查签名清单，并按平台下载和校验安装包。
+3. 将 `desktop/dist/naro-update-v1.json` 和参与签名的安装包上传到对应的 GitHub Release 草稿（例如 `v0.0.0`），保留文件名，再作为最新的正式版本发布。客户端通过 HTTPS 检查签名清单，并按平台下载和校验安装包。
 
 ## 网页 API
 
@@ -246,4 +308,4 @@ Rust 和 Go 测试分别用 `cargo test --locked` 和 `go test ./...` 运行。�
 
 ## 许可证
 
-Naro 源码采用 [MIT 许可证](LICENSE)。随附的 Noto Sans CJK SC 字体采用 [SIL Open Font License 1.1](assets/OFL.txt)。
+Naro 源码采用 [MIT 许可证](LICENSE)。随附的 Noto Sans CJK SC 字体采用 [SIL Open Font License 1.1](desktop/assets/OFL.txt)。
